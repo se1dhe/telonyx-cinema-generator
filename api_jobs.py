@@ -17,6 +17,7 @@ async def create_job_handler(
     music: UploadFile | None = File(default=None),
     focus_prompt: str = Form(default=''),
     target_seconds: int = Form(default=30),
+    enable_color: bool = Form(default=True),
 ):
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
@@ -38,6 +39,7 @@ async def create_job_handler(
         'progress': '0',
         'focus_prompt': focus_prompt,
         'target_seconds': str(target_seconds),
+        'enable_color': str(enable_color).lower(),
         'video_path': str(video_path),
         'music_path': music_path,
         'output_path': str(output_path),
