@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 from redis import Redis
+from video_filters import build_video_filter
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
@@ -25,6 +26,7 @@ def render_job(job_id: str):
     music_path = decoded.get('music_path') or ''
     output_path = decoded['output_path']
     target_seconds = int(decoded.get('target_seconds', '30'))
+    enable_color = decoded.get('enable_color', 'true').lower() == 'true'
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     redis.hset(key, mapping={'status': 'processing', 'progress': '10'})
@@ -33,7 +35,7 @@ def render_job(job_id: str):
     run_cmd([
         'ffmpeg', '-y', '-i', video_path,
         '-t', str(target_seconds),
-        '-vf', 'scale=-2:1920,crop=1080:1920',
+        '-vf', build_video_filter(enable_color),
         '-an', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
         temp_path,
     ])
