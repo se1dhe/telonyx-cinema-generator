@@ -14,6 +14,7 @@ class RenderOptions:
     transitions_enabled: bool = True
     transition_style: str = 'glitch'
     beat_sync: str = 'soft'
+    music_start_seconds: float = 0.0
     centering_enabled: bool = True
     centering_mode: str = 'action'
     effects_enabled: bool = True
