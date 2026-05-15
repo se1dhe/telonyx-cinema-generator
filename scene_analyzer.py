@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from motion_score import score_motion
+
 
 def probe_duration(video_path: str) -> float:
     process = subprocess.run(
@@ -18,7 +20,7 @@ def probe_duration(video_path: str) -> float:
 def build_segments(video_path: str, target_seconds: int) -> list[dict]:
     duration = probe_duration(video_path)
     if duration <= target_seconds:
-        return [{'start': 0.0, 'duration': duration, 'score': 1.0}]
+        return [{'start': 0.0, 'duration': duration, 'score': 1.0, 'scene_score': 1.0, 'motion_score': 0.0}]
 
     chunk = 4.0
     segments = []
@@ -26,8 +28,16 @@ def build_segments(video_path: str, target_seconds: int) -> list[dict]:
     while cursor < duration:
         remaining = duration - cursor
         length = min(chunk, remaining)
-        score = score_segment(video_path, cursor, length)
-        segments.append({'start': round(cursor, 3), 'duration': round(length, 3), 'score': score})
+        scene = score_scene(video_path, cursor, length)
+        motion = score_motion(video_path, cursor, length)
+        score = scene * 2.0 + motion
+        segments.append({
+            'start': round(cursor, 3),
+            'duration': round(length, 3),
+            'score': round(score, 4),
+            'scene_score': round(scene, 4),
+            'motion_score': round(motion, 4),
+        })
         cursor += chunk
 
     segments.sort(key=lambda item: item['score'], reverse=True)
@@ -43,7 +53,7 @@ def build_segments(video_path: str, target_seconds: int) -> list[dict]:
     return trim_segments(selected, target_seconds)
 
 
-def score_segment(video_path: str, start: float, duration: float) -> float:
+def score_scene(video_path: str, start: float, duration: float) -> float:
     command = [
         'ffmpeg', '-hide_banner', '-ss', str(start), '-t', str(duration), '-i', video_path,
         '-vf', 'select=gt(scene\\,0.08),showinfo', '-an', '-f', 'null', '-'
