@@ -44,6 +44,10 @@ def render_job(job_id: str) -> None:
     color_preset = job.get('color_preset', 'dark_cinema')
     subtitle_enabled = job.get('subtitle_enabled', 'false') == 'true'
     centering_enabled = job.get('centering_enabled', 'true') == 'true'
+    transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
+    transition_style = job.get('transition_style', 'glitch')
+    effects_enabled = job.get('effects_enabled', 'true') == 'true'
+    effect_intensity = job.get('effect_intensity', 'medium')
     focus_prompt = job.get('focus_prompt') or 'TELONYX CINEMA'
 
     out_dir = Path(output_path).parent
@@ -68,6 +72,10 @@ def render_job(job_id: str) -> None:
         enable_color=color_enabled,
         color_preset=color_preset,
         enable_centering=centering_enabled,
+        enable_effects=effects_enabled,
+        effect_intensity=effect_intensity,
+        transitions_enabled=transitions_enabled,
+        transition_style=transition_style,
     )
 
     silent_path = str(out_dir / 'silent.mp4')
