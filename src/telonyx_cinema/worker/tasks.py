@@ -10,6 +10,7 @@ from redis import Redis
 
 from telonyx_cinema.pipeline.beat_detector import detect_beats, save_beats
 from telonyx_cinema.pipeline.concat_builder import render_segments
+from telonyx_cinema.pipeline.input_normalizer import normalize_input_video
 from telonyx_cinema.pipeline.scene_analyzer import build_segments, save_segments
 from telonyx_cinema.pipeline.whisper_subtitles import build_subtitles
 
@@ -76,7 +77,7 @@ def render_job(job_id: str) -> None:
             raise RuntimeError('job not found')
 
         job = {k.decode(): v.decode() for k, v in data.items()}
-        video_path = job['video_path']
+        original_video_path = job['video_path']
         music_path = job.get('music_path') or ''
         output_path = job['output_path']
         target_seconds = int(job.get('target_seconds', '30'))
@@ -93,8 +94,8 @@ def render_job(job_id: str) -> None:
         effect_intensity = job.get('effect_intensity', 'medium')
         focus_prompt = job.get('focus_prompt') or 'TELONYX CINEMA'
 
-        if not Path(video_path).exists():
-            raise RuntimeError(f'input video not found: {video_path}')
+        if not Path(original_video_path).exists():
+            raise RuntimeError(f'input video not found: {original_video_path}')
         if music_path and not Path(music_path).exists():
             raise RuntimeError(f'music file not found: {music_path}')
 
@@ -116,23 +117,28 @@ def render_job(job_id: str) -> None:
             'transition_style': transition_style,
             'effects_enabled': effects_enabled,
             'effect_intensity': effect_intensity,
+            'input_normalization': 'h264_yuv420p',
         }
         redis.hset(key, mapping={'render_summary': json.dumps(render_summary, ensure_ascii=False)})
 
-        set_progress(redis, key, 8, 'detecting beats')
+        set_progress(redis, key, 5, 'normalizing input video')
+        video_path = normalize_input_video(original_video_path, str(out_dir))
+        redis.hset(key, mapping={'normalized_video_path': video_path})
+
+        set_progress(redis, key, 12, 'detecting beats')
         if music_path:
             beats = detect_beats(music_path)
             save_beats(str(out_dir / 'beats.txt'), beats)
         else:
             beats = []
 
-        set_progress(redis, key, 18, 'analyzing scenes')
+        set_progress(redis, key, 22, 'analyzing scenes')
         segments = build_segments(video_path, target_seconds)
         if not segments:
             raise RuntimeError('scene analyzer returned zero segments')
         save_segments(str(out_dir / 'segments.json'), segments)
 
-        set_progress(redis, key, 40, f'rendering {len(segments)} segments')
+        set_progress(redis, key, 42, f'rendering {len(segments)} segments')
         concat_list = render_segments(
             video_path=video_path,
             segments=segments,
