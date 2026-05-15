@@ -29,6 +29,7 @@ async def create_job_handler(
     transition_style: str = Form(default='glitch'),
     centering_enabled: bool = Form(default=True),
     effects_enabled: bool = Form(default=True),
+    effect_intensity: str = Form(default='medium'),
 ):
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
@@ -56,6 +57,7 @@ async def create_job_handler(
         transition_style=transition_style,
         centering_enabled=centering_enabled,
         effects_enabled=effects_enabled,
+        effect_intensity=effect_intensity,
     )
 
     output_path = job_dir / 'final.mp4'
