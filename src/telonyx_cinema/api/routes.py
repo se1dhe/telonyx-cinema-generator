@@ -50,7 +50,8 @@ async def create_job_handler(
 
     music_path = ''
     if music and music.filename:
-        music_file = job_dir / 'music' + Path(music.filename).suffix.lower()
+        music_suffix = Path(music.filename).suffix.lower()
+        music_file = job_dir / f'music{music_suffix}'
         music_file.write_bytes(await music.read())
         ensure_saved_size(music_file, 'Music')
         music_path = str(music_file)
