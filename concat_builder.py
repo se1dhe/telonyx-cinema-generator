@@ -3,14 +3,14 @@ from pathlib import Path
 from smart_filters import build_smart_filter
 
 
-def render_segments(video_path: str, segments: list[dict], work_dir: str, enable_color: bool) -> str:
+def render_segments(video_path: str, segments: list[dict], work_dir: str, enable_color: bool, color_preset: str = 'dark_cinema') -> str:
     directory = Path(work_dir)
     directory.mkdir(parents=True, exist_ok=True)
     rendered_files = []
 
     for index, segment in enumerate(segments):
         output = directory / f'segment_{index:03d}.mp4'
-        render_one_segment(video_path, segment, str(output), enable_color)
+        render_one_segment(video_path, segment, str(output), enable_color, color_preset)
         rendered_files.append(output)
 
     list_path = directory / 'concat.txt'
@@ -22,10 +22,10 @@ def render_segments(video_path: str, segments: list[dict], work_dir: str, enable
     return str(list_path)
 
 
-def render_one_segment(video_path: str, segment: dict, output_path: str, enable_color: bool) -> None:
+def render_one_segment(video_path: str, segment: dict, output_path: str, enable_color: bool, color_preset: str) -> None:
     import subprocess
 
-    vf = build_smart_filter(video_path, segment, enable_color)
+    vf = build_smart_filter(video_path, segment, enable_color, color_preset)
     cmd = [
         'ffmpeg', '-y',
         '-ss', str(segment['start']),
