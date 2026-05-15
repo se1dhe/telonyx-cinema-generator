@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -40,9 +41,12 @@ def render_job(job_id: str) -> None:
     music_path = job.get('music_path') or ''
     output_path = job['output_path']
     target_seconds = int(job.get('target_seconds', '30'))
+    platform = job.get('platform', 'shorts')
     color_enabled = job.get('color_enabled', 'true') == 'true'
     color_preset = job.get('color_preset', 'dark_cinema')
     subtitle_enabled = job.get('subtitle_enabled', 'false') == 'true'
+    subtitle_language = job.get('subtitle_language', 'auto')
+    subtitle_style = job.get('subtitle_style', 'cinematic')
     centering_enabled = job.get('centering_enabled', 'true') == 'true'
     transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
     transition_style = job.get('transition_style', 'glitch')
@@ -52,6 +56,24 @@ def render_job(job_id: str) -> None:
 
     out_dir = Path(output_path).parent
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    render_summary = {
+        'platform': platform,
+        'target_seconds': target_seconds,
+        'focus_prompt': focus_prompt,
+        'music_enabled': bool(music_path),
+        'color_enabled': color_enabled,
+        'color_preset': color_preset,
+        'subtitle_enabled': subtitle_enabled,
+        'subtitle_language': subtitle_language,
+        'subtitle_style': subtitle_style,
+        'centering_enabled': centering_enabled,
+        'transitions_enabled': transitions_enabled,
+        'transition_style': transition_style,
+        'effects_enabled': effects_enabled,
+        'effect_intensity': effect_intensity,
+    }
+    redis.hset(key, mapping={'render_summary': json.dumps(render_summary, ensure_ascii=False)})
 
     redis.hset(key, mapping={'status': 'processing', 'progress': '8', 'log': 'detecting beats'})
     if music_path:
@@ -102,4 +124,4 @@ def render_job(job_id: str) -> None:
     else:
         Path(mixed_path).replace(output_path)
 
-    redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}'})
+    redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}, segments={len(segments)}'})
