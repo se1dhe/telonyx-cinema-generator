@@ -82,9 +82,18 @@ def get_job_handler(job_id: str):
     data = redis.hgetall(f'job:{job_id}')
     if not data:
         raise HTTPException(status_code=404, detail='Job not found')
+
     result = {k.decode(): v.decode() for k, v in data.items()}
-    if result.get('status') == 'done':
+    output_path = result.get('output_path')
+    output_exists = bool(output_path and Path(output_path).exists())
+    result['output_exists'] = str(output_exists).lower()
+
+    if result.get('status') == 'done' and output_exists:
         result['output_url'] = f'/api/jobs/{job_id}/download'
+    elif result.get('status') == 'done' and not output_exists:
+        result['status'] = 'failed'
+        result['error'] = 'Render marked as done but final file does not exist'
+
     return result
 
 
