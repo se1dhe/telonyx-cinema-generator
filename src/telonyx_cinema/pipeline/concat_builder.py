@@ -13,6 +13,8 @@ def render_segments(
     enable_centering: bool = True,
     enable_effects: bool = True,
     effect_intensity: str = 'medium',
+    transitions_enabled: bool = True,
+    transition_style: str = 'glitch',
 ) -> str:
     directory = Path(work_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -29,6 +31,8 @@ def render_segments(
             enable_centering,
             enable_effects,
             effect_intensity,
+            transitions_enabled,
+            transition_style,
         )
         rendered_files.append(output)
 
@@ -50,6 +54,8 @@ def render_one_segment(
     enable_centering: bool,
     enable_effects: bool,
     effect_intensity: str,
+    transitions_enabled: bool,
+    transition_style: str,
 ) -> None:
     vf = build_smart_filter(
         video_path=video_path,
@@ -59,6 +65,8 @@ def render_one_segment(
         enable_centering=enable_centering,
         enable_effects=enable_effects,
         effect_intensity=effect_intensity,
+        transitions_enabled=transitions_enabled,
+        transition_style=transition_style,
     )
     cmd = [
         'ffmpeg', '-y', '-ss', str(segment['start']), '-t', str(segment['duration']), '-i', video_path,
