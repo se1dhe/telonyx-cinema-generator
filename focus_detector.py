@@ -1,7 +1,13 @@
 import cv2
 
+from yolo_focus import detect_yolo_center
+
 
 def detect_focus_center(video_path: str, start: float, duration: float) -> tuple[float, float] | None:
+    yolo_center = detect_yolo_center(video_path, start, duration)
+    if yolo_center is not None:
+        return yolo_center
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
