@@ -6,12 +6,12 @@ The user uploads a rough movie edit, uploads a music track, selects render optio
 
 ## Current status
 
-Railway MVP is deploy-ready:
+Railway MVP is deploy-ready as a single Railway service:
 
 - FastAPI web service;
+- background RQ worker in the same container;
 - Redis/RQ queue;
-- separate worker service;
-- shared storage volume support;
+- single storage volume support;
 - web UI;
 - diagnostics endpoint;
 - worker heartbeat;
@@ -22,47 +22,35 @@ Railway MVP is deploy-ready:
 - Dockerfile;
 - docker-compose local stack.
 
-## Local run
+## Railway MVP deploy
+
+Create one Railway service from this GitHub repository.
+
+The Dockerfile starts:
 
 ```bash
-chmod +x scripts/local_dev.sh
-./scripts/local_dev.sh
+/app/scripts/railway_start.sh
 ```
 
-Open:
+Leave Railway Start Command empty, or set it to:
+
+```bash
+/app/scripts/railway_start.sh
+```
+
+Add Railway Redis plugin and set:
+
+```env
+REDIS_URL=${{Redis.REDIS_URL}}
+```
+
+Mount one volume to:
 
 ```text
-http://localhost:8080
-http://localhost:8080/api/health
-http://localhost:8080/api/diagnostics
+/data/storage
 ```
 
-## Railway services
-
-### API service
-
-Start command:
-
-```bash
-uvicorn telonyx_cinema.api.main:app --host 0.0.0.0 --port $PORT
-```
-
-### Worker service
-
-Start command:
-
-```bash
-python -m telonyx_cinema.worker.main
-```
-
-## Required Railway resources
-
-- API service from this repository.
-- Worker service from this repository.
-- Redis plugin.
-- Persistent volume mounted to `/data/storage` for both API and worker.
-
-## Required environment variables
+## Required Railway environment variables
 
 ```env
 PYTHONPATH=/app/src
@@ -86,6 +74,7 @@ WHISPER_MODEL=base
 After deploy, open:
 
 ```text
+/api/health
 /api/diagnostics
 ```
 
@@ -99,6 +88,21 @@ Expected:
     "queue": "render"
   }
 }
+```
+
+## Local run
+
+```bash
+chmod +x scripts/local_dev.sh
+./scripts/local_dev.sh
+```
+
+Open:
+
+```text
+http://localhost:8080
+http://localhost:8080/api/health
+http://localhost:8080/api/diagnostics
 ```
 
 ## Current pipeline
@@ -127,6 +131,10 @@ Manual cleanup:
 ```bash
 python -m telonyx_cinema.maintenance.cleanup
 ```
+
+## Later architecture
+
+After the MVP is stable, split into API service and Worker service. At that point file storage should move to S3/R2 instead of local volume.
 
 ## Project layout
 
