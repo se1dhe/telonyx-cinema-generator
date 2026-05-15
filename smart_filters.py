@@ -1,9 +1,10 @@
+from color_presets import get_color_filter
 from crop_math import crop_x_expr
 from focus_detector import detect_focus_center
 from video_probe import probe_size
 
 
-def build_smart_filter(video_path: str, segment: dict, enable_color: bool) -> str:
+def build_smart_filter(video_path: str, segment: dict, enable_color: bool, color_preset: str = 'dark_cinema') -> str:
     width, height = probe_size(video_path)
     center = detect_focus_center(video_path, float(segment['start']), float(segment['duration']))
     if center is None:
@@ -18,6 +19,7 @@ def build_smart_filter(video_path: str, segment: dict, enable_color: bool) -> st
     else:
         base = f'crop={crop_w}:{height}:{crop_x}:0,scale=1080:1920'
 
-    if enable_color:
-        return base + ',eq=contrast=1.12:saturation=1.08:brightness=-0.015,unsharp=5:5:0.8:3:3:0.4'
+    color = get_color_filter(color_preset, enable_color)
+    if color:
+        return base + ',' + color
     return base
