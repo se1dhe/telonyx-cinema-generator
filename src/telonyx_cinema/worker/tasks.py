@@ -9,10 +9,13 @@ from pathlib import Path
 from redis import Redis
 
 from telonyx_cinema.pipeline.beat_detector import detect_beats, save_beats
-from telonyx_cinema.pipeline.beat_sync import align_segments_to_beats, build_relative_beat_grid
+from telonyx_cinema.pipeline.beat_sync import build_relative_beat_grid
 from telonyx_cinema.pipeline.concat_builder import render_segments
+from telonyx_cinema.pipeline.edit_planner import build_premium_edit_plan, save_edit_plan
 from telonyx_cinema.pipeline.input_normalizer import normalize_input_video
+from telonyx_cinema.pipeline.music_analyzer import analyze_music, save_music_analysis
 from telonyx_cinema.pipeline.scene_analyzer import build_segments, save_segments
+from telonyx_cinema.pipeline.video_moment_selector import save_video_moments, select_video_moments
 from telonyx_cinema.pipeline.whisper_subtitles import build_subtitles
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -67,6 +70,27 @@ def burn_subtitles(input_path: str, ass_path: str, output_path: str) -> None:
     ])
 
 
+def build_segments_for_job(video_path: str, music_path: str, out_dir: Path, target_seconds: int, music_start_seconds: float, beat_sync: str, transition_style: str) -> tuple[list[dict], int]:
+    if music_path:
+        music_analysis = analyze_music(music_path, music_start_seconds, target_seconds)
+        save_music_analysis(str(out_dir / 'music_analysis.json'), music_analysis)
+        moments = select_video_moments(video_path, target_seconds)
+        save_video_moments(str(out_dir / 'video_moments.json'), moments)
+        segments = build_premium_edit_plan(
+            moments=moments,
+            music_analysis=music_analysis,
+            target_seconds=target_seconds,
+            beat_sync=beat_sync,
+            transition_style=transition_style,
+        )
+        save_edit_plan(str(out_dir / 'edit_plan.json'), segments)
+        return segments, len(music_analysis.get('beats') or [])
+
+    segments = build_segments(video_path, target_seconds)
+    save_segments(str(out_dir / 'segments.json'), segments)
+    return segments, 0
+
+
 def render_job(job_id: str) -> None:
     redis = Redis.from_url(REDIS_URL)
     key = f'job:{job_id}'
@@ -91,7 +115,7 @@ def render_job(job_id: str) -> None:
         centering_enabled = job.get('centering_enabled', 'true') == 'true'
         transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
         transition_style = job.get('transition_style', 'glitch')
-        beat_sync = job.get('beat_sync', 'soft')
+        beat_sync = job.get('beat_sync', 'strict')
         music_start_seconds = float(job.get('music_start_seconds', '0') or 0)
         effects_enabled = job.get('effects_enabled', 'true') == 'true'
         effect_intensity = job.get('effect_intensity', 'medium')
@@ -112,6 +136,7 @@ def render_job(job_id: str) -> None:
             'music_enabled': bool(music_path),
             'music_start_seconds': music_start_seconds,
             'beat_sync': beat_sync,
+            'planner': 'premium_music_driven',
             'color_enabled': color_enabled,
             'color_preset': color_preset,
             'subtitle_enabled': subtitle_enabled,
@@ -130,26 +155,13 @@ def render_job(job_id: str) -> None:
         video_path = normalize_input_video(original_video_path, str(out_dir))
         redis.hset(key, mapping={'normalized_video_path': video_path})
 
-        set_progress(redis, key, 12, 'detecting beats')
-        if music_path:
-            beats = detect_beats(music_path)
-            save_beats(str(out_dir / 'beats.txt'), beats)
-            relative_beats = build_relative_beat_grid(beats, target_seconds, music_start_seconds)
-            save_beats(str(out_dir / 'relative_beats.txt'), relative_beats)
-        else:
-            beats = []
-            relative_beats = []
-
-        set_progress(redis, key, 22, 'analyzing scenes')
-        segments = build_segments(video_path, target_seconds)
+        set_progress(redis, key, 18, 'building premium music-driven edit plan')
+        segments, beat_count = build_segments_for_job(video_path, music_path, out_dir, target_seconds, music_start_seconds, beat_sync, transition_style)
         if not segments:
-            raise RuntimeError('scene analyzer returned zero segments')
-        segments = align_segments_to_beats(segments, relative_beats, target_seconds, beat_sync)
-        if not segments:
-            raise RuntimeError('beat sync returned zero segments')
-        save_segments(str(out_dir / 'segments.json'), segments)
+            raise RuntimeError('premium edit planner returned zero segments')
+        redis.hset(key, mapping={'edit_plan_segments': str(len(segments)), 'music_beats': str(beat_count)})
 
-        set_progress(redis, key, 42, f'rendering {len(segments)} beat-synced segments')
+        set_progress(redis, key, 42, f'rendering {len(segments)} premium planned segments')
         concat_list = render_segments(
             video_path=video_path,
             segments=segments,
@@ -199,7 +211,7 @@ def render_job(job_id: str) -> None:
         if not Path(output_path).exists():
             raise RuntimeError('final render output was not created')
 
-        redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}, segments={len(segments)}'})
+        redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={beat_count}, segments={len(segments)}'})
         update_worker_heartbeat(redis, 'idle', job_id)
     except Exception as error:
         fail_job(redis, key, error)
