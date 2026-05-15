@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from video_filters import build_video_filter
+from smart_filters import build_smart_filter
 
 
 def render_segments(video_path: str, segments: list[dict], work_dir: str, enable_color: bool) -> str:
@@ -25,12 +25,13 @@ def render_segments(video_path: str, segments: list[dict], work_dir: str, enable
 def render_one_segment(video_path: str, segment: dict, output_path: str, enable_color: bool) -> None:
     import subprocess
 
+    vf = build_smart_filter(video_path, segment, enable_color)
     cmd = [
         'ffmpeg', '-y',
         '-ss', str(segment['start']),
         '-t', str(segment['duration']),
         '-i', video_path,
-        '-vf', build_video_filter(enable_color),
+        '-vf', vf,
         '-an', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
         output_path,
     ]
