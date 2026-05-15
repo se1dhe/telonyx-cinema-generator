@@ -1,15 +1,43 @@
-import subprocess
+import cv2
+import numpy as np
 
 
 def score_motion(video_path: str, start: float, duration: float) -> float:
-    command = [
-        'ffmpeg', '-hide_banner', '-ss', str(start), '-t', str(duration), '-i', video_path,
-        '-vf', 'fps=3,scale=160:-1,format=gray,metadata=print',
-        '-an', '-f', 'null', '-'
-    ]
-    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if process.returncode != 0:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
         return 0.0
-    text = process.stderr or ''
-    frames = text.count('frame=')
-    return float(max(frames, 1))
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    start_frame = int(start * fps)
+    end_frame = int((start + duration) * fps)
+    step = max(int(fps / 4), 1)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    previous = None
+    scores = []
+    frame_index = start_frame
+
+    while frame_index < end_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if previous is not None:
+            diff = cv2.absdiff(previous, gray)
+            value = float(np.mean(diff))
+            scores.append(value)
+
+        previous = gray
+        frame_index += step
+
+    cap.release()
+
+    if not scores:
+        return 0.0
+
+    return float(np.mean(scores))
