@@ -22,6 +22,8 @@ async def create_job_handler(
     focus_prompt: str = Form(default=''),
     target_seconds: int = Form(default=30),
     platform: str = Form(default='shorts'),
+    edit_preset: str = Form(default='cinematic'),
+    edit_mode: str = Form(default='action'),
     subtitle_enabled: bool = Form(default=False),
     subtitle_language: str = Form(default='auto'),
     subtitle_style: str = Form(default='cinematic'),
@@ -43,6 +45,10 @@ async def create_job_handler(
         raise HTTPException(status_code=400, detail='target_seconds must be between 5 and 180')
     if music_start_seconds < 0 or music_start_seconds > 600:
         raise HTTPException(status_code=400, detail='music_start_seconds must be between 0 and 600')
+    if edit_preset not in {'aggressive', 'cinematic', 'sad', 'cyberpunk'}:
+        raise HTTPException(status_code=400, detail='Unsupported edit_preset')
+    if edit_mode not in {'action', 'intro', 'dialogue'}:
+        raise HTTPException(status_code=400, detail='Unsupported edit_mode')
 
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
@@ -86,6 +92,8 @@ async def create_job_handler(
         'video_path': str(video_path),
         'music_path': music_path,
         'output_path': str(output_path),
+        'edit_preset': edit_preset,
+        'edit_mode': edit_mode,
         **options_to_redis_mapping(options),
     }
 
