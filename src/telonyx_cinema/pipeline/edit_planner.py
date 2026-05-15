@@ -1,40 +1,45 @@
 import json
 from pathlib import Path
 
+from telonyx_cinema.pipeline.edit_presets import get_edit_preset
 
-def _beat_intervals(beats: list[float], target_seconds: int, mode: str) -> list[float]:
+
+def _beat_intervals(beats: list[float], target_seconds: int, preset: dict) -> list[float]:
     if len(beats) < 2:
         return [1.0] * int(target_seconds)
 
-    base = []
+    pattern = preset.get('cut_pattern') or [2, 2, 4]
+    result = []
     i = 0
-    while i < len(beats) - 1:
-        one = beats[i + 1] - beats[i]
-        if one <= 0:
-            i += 1
-            continue
+    p = 0
+    total = 0.0
 
-        # Strict: много быстрых cuts. Soft: микс 1/2/4 beat blocks.
-        if mode == 'strict':
-            block = 1 if i % 4 in (0, 1, 2) else 2
-        else:
-            block = 2 if i % 5 in (0, 1, 2) else 4
-
+    while i < len(beats) - 1 and total < target_seconds:
+        block = int(pattern[p % len(pattern)])
         j = min(i + block, len(beats) - 1)
         duration = beats[j] - beats[i]
-        if 0.35 <= duration <= 3.5:
-            base.append(round(float(duration), 3))
+        if 0.28 <= duration <= 4.8:
+            remaining = float(target_seconds) - total
+            clipped = round(min(float(duration), remaining), 3)
+            if clipped >= 0.28:
+                result.append(clipped)
+                total += clipped
         i = j
+        p += 1
 
-    result = []
-    total = 0.0
-    for duration in base:
-        if total >= target_seconds:
-            break
-        remaining = target_seconds - total
-        result.append(round(min(duration, remaining), 3))
-        total += duration
     return result
+
+
+def _segment_role(index: int, cursor: float, source: dict, preset: dict, mode: str) -> str:
+    if mode == 'dialogue':
+        if cursor < float(preset.get('dialogue_hold_seconds', 3.5)):
+            return 'dialogue'
+    if mode == 'intro' or mode == 'dialogue':
+        if cursor < float(preset.get('intro_seconds', 3.0)):
+            return 'intro'
+    if source.get('motion', 0) < 3.0 and source.get('contrast', 0) > 20:
+        return 'mood'
+    return 'action'
 
 
 def build_premium_edit_plan(
@@ -43,29 +48,24 @@ def build_premium_edit_plan(
     target_seconds: int,
     beat_sync: str = 'strict',
     transition_style: str = 'glitch',
+    preset_name: str = 'cinematic',
+    edit_mode: str = 'action',
 ) -> list[dict]:
-    """
-    Создаёт монтажный план из сильных видеомоментов и музыкальной сетки.
-
-    Главное отличие от MVP:
-    - длительность каждого клипа идёт от beat grid;
-    - на peak beats ставятся лучшие моменты;
-    - клипы чередуются, чтобы монтаж не был линейной кашей;
-    - каждый сегмент получает impact flag для переходов.
-    """
+    preset = get_edit_preset(preset_name)
     beats = music_analysis.get('beats') or []
     peak_times = {round(float(item['time']), 1) for item in music_analysis.get('peak_beats', [])}
-    durations = _beat_intervals(beats, target_seconds, beat_sync)
+    durations = _beat_intervals(beats, target_seconds, preset)
     if not durations:
         durations = [1.0] * target_seconds
 
     ranked = list(moments)
     if not ranked:
-        ranked = [{'start': 0.0, 'duration': 1.0, 'score': 1.0}]
+        ranked = [{'start': 0.0, 'duration': 1.0, 'score': 1.0, 'motion': 0, 'contrast': 0}]
 
-    # Пул: топовые моменты + немного более спокойных для дыхания.
     top = ranked[: max(8, len(ranked) // 2)]
     rest = ranked[max(8, len(ranked) // 2):] or ranked
+    speed_pattern = preset.get('speed_pattern') or [1.0]
+    impact_every = max(int(preset.get('impact_every', 4)), 1)
 
     plan = []
     cursor = 0.0
@@ -76,7 +76,7 @@ def build_premium_edit_plan(
         if cursor >= target_seconds - 0.1:
             break
 
-        is_peak = any(abs(cursor - peak) <= 0.22 for peak in peak_times)
+        is_peak = any(abs(cursor - peak) <= 0.24 for peak in peak_times)
         if is_peak or index % 3 != 1:
             source = top[top_index % len(top)]
             top_index += 1
@@ -84,23 +84,39 @@ def build_premium_edit_plan(
             source = rest[rest_index % len(rest)]
             rest_index += 1
 
-        source_duration = float(source.get('duration', duration))
-        max_start_offset = max(source_duration - duration, 0.0)
+        role = _segment_role(index, cursor, source, preset, edit_mode)
+        speed = float(speed_pattern[index % len(speed_pattern)])
+        if role in ('intro', 'dialogue'):
+            speed = min(speed, 1.0)
+        if is_peak and role == 'action':
+            speed = max(speed, 1.08)
+
+        timeline_duration = min(float(duration), float(target_seconds) - cursor)
+        source_duration = max(timeline_duration * speed, 0.35)
+        source_window_duration = float(source.get('duration', source_duration))
+        max_start_offset = max(source_window_duration - source_duration, 0.0)
         start = float(source.get('start', 0.0)) + min(max_start_offset, 0.25)
-        final_duration = min(float(duration), float(target_seconds) - cursor)
-        if final_duration < 0.35:
+
+        if timeline_duration < 0.28:
             continue
 
+        impact = bool(is_peak or index % impact_every == 0)
         plan.append({
             'start': round(start, 3),
-            'duration': round(final_duration, 3),
+            'duration': round(timeline_duration, 3),
+            'source_duration': round(source_duration, 3),
             'timeline_start': round(cursor, 3),
             'score': source.get('score', 0),
-            'impact': bool(is_peak or index % 4 == 0),
+            'motion': source.get('motion', 0),
+            'contrast': source.get('contrast', 0),
+            'impact': impact,
+            'speed': round(speed, 3),
+            'role': role,
             'transition_style': transition_style,
+            'xfade_duration': float(preset.get('xfade_duration', 0.12)),
             'beat_aligned': True,
         })
-        cursor += final_duration
+        cursor += timeline_duration
 
     return plan
 
