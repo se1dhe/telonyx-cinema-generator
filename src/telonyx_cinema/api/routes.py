@@ -29,6 +29,8 @@ async def create_job_handler(
     color_preset: str = Form(default='dark_cinema'),
     transitions_enabled: bool = Form(default=True),
     transition_style: str = Form(default='glitch'),
+    beat_sync: str = Form(default='soft'),
+    music_start_seconds: float = Form(default=0.0),
     centering_enabled: bool = Form(default=True),
     effects_enabled: bool = Form(default=True),
     effect_intensity: str = Form(default='medium'),
@@ -39,6 +41,8 @@ async def create_job_handler(
 
     if target_seconds < 5 or target_seconds > 180:
         raise HTTPException(status_code=400, detail='target_seconds must be between 5 and 180')
+    if music_start_seconds < 0 or music_start_seconds > 600:
+        raise HTTPException(status_code=400, detail='music_start_seconds must be between 0 and 600')
 
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
@@ -67,6 +71,8 @@ async def create_job_handler(
         color_preset=color_preset,
         transitions_enabled=transitions_enabled,
         transition_style=transition_style,
+        beat_sync=beat_sync,
+        music_start_seconds=music_start_seconds,
         centering_enabled=centering_enabled,
         effects_enabled=effects_enabled,
         effect_intensity=effect_intensity,
