@@ -35,7 +35,7 @@ def render_home_page() -> str:
       <section class="card">
         <span class="badge">AI post-production для movie edits</span>
         <h1>Черновик фильма → премиальный vertical edit</h1>
-        <p>Загрузи черновую нарезку, добавь трек, выбери субтитры, цвет, переходы, beat-sync и центрирование. Worker соберёт готовый TikTok / Shorts / Reels ролик.</p>
+        <p>Загрузи черновую нарезку, добавь трек, выбери старт трека, beat-sync, цвет, переходы и центрирование. Worker соберёт готовый TikTok / Shorts / Reels ролик.</p>
         <div class="stat"><div><b>9:16</b><span>1080x1920</span></div><div><b>AI</b><span>YOLO + OpenCV</span></div><div><b>FFmpeg</b><span>render core</span></div></div>
       </section>
       <section class="card">
@@ -44,7 +44,9 @@ def render_home_page() -> str:
           <label>Музыка<input type="file" name="music" accept="audio/*"></label>
           <div class="grid">
             <label>Персонаж / фокус<input name="focus_prompt" placeholder="Дарт Вейдер"></label>
-            <label>Длительность<input type="number" name="target_seconds" value="30" min="10" max="90"></label>
+            <label>Длительность<input type="number" name="target_seconds" value="30" min="5" max="180"></label>
+            <label>Старт музыки, сек<input type="number" name="music_start_seconds" value="0" min="0" max="600" step="0.1"></label>
+            <label>Beat Sync<select name="beat_sync"><option value="soft" selected>Soft</option><option value="strict">Strict</option><option value="off">Off</option></select></label>
             <label>Платформа<select name="platform"><option value="shorts">YouTube Shorts</option><option value="tiktok">TikTok</option><option value="reels">Reels</option></select></label>
             <label>Язык субтитров<select name="subtitle_language"><option value="auto">Auto</option><option value="ru">Русский</option><option value="en">English</option><option value="uk">Українська</option></select></label>
             <label>Цвет<select name="color_preset"><option value="dark_cinema">Dark Cinema</option><option value="cyberpunk_neon">Cyberpunk Neon</option><option value="vader_red">Vader Red</option><option value="drive_night">Drive Night</option><option value="neutral">Neutral</option></select></label>
@@ -58,9 +60,8 @@ def render_home_page() -> str:
             <label class="check"><input type="checkbox" name="transitions_enabled" checked> Переходы</label>
             <label class="check"><input type="checkbox" name="centering_enabled" checked> Центрирование</label>
             <label class="check"><input type="checkbox" name="effects_enabled" checked> Эффекты</label>
-            <label class="check"><input type="checkbox" name="beat_sync_enabled" checked> Beat Sync</label>
           </div>
-          <p class="hint">Первый Railway-тест лучше запускать без Whisper-субтитров: быстрее проверим рендер, очередь и скачивание.</p>
+          <p class="hint">Для эдитов бери старт музыки с дропа/сильного момента. Например: 16.0, 42.5, 132.0.</p>
           <button type="submit">Создать премиальный edit</button>
         </form>
       </section>
