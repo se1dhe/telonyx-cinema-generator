@@ -3,7 +3,9 @@ import subprocess
 from pathlib import Path
 
 from redis import Redis
-from video_filters import build_video_filter
+
+from concat_builder import render_segments
+from scene_analyzer import build_segments, save_segments
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
@@ -28,18 +30,23 @@ def render_job(job_id: str):
     target_seconds = int(decoded.get('target_seconds', '30'))
     enable_color = decoded.get('enable_color', 'true').lower() == 'true'
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    redis.hset(key, mapping={'status': 'processing', 'progress': '10'})
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    redis.hset(key, mapping={'status': 'processing', 'progress': '10', 'log': 'analyzing scenes'})
+
+    segments = build_segments(video_path, target_seconds)
+    save_segments(str(output_dir / 'segments.json'), segments)
+    redis.hset(key, mapping={'progress': '35', 'log': f'selected {len(segments)} segments'})
+
+    concat_list = render_segments(video_path, segments, str(output_dir / 'segments'), enable_color)
+    redis.hset(key, mapping={'progress': '70', 'log': 'segments rendered'})
 
     temp_path = str(Path(output_path).with_suffix('.silent.mp4'))
     run_cmd([
-        'ffmpeg', '-y', '-i', video_path,
-        '-t', str(target_seconds),
-        '-vf', build_video_filter(enable_color),
-        '-an', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
-        temp_path,
+        'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list,
+        '-c', 'copy', temp_path,
     ])
-    redis.hset(key, mapping={'progress': '75'})
+    redis.hset(key, mapping={'progress': '82', 'log': 'video assembled'})
 
     if music_path:
         run_cmd([
@@ -52,4 +59,4 @@ def render_job(job_id: str):
     else:
         Path(temp_path).replace(output_path)
 
-    redis.hset(key, mapping={'status': 'done', 'progress': '100'})
+    redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': 'done'})
