@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import traceback
 from pathlib import Path
 
 from redis import Redis
@@ -16,7 +17,28 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 def run_cmd(cmd: list[str]) -> None:
     process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if process.returncode != 0:
-        raise RuntimeError(process.stderr[-3000:])
+        command = ' '.join(cmd[:8])
+        error_tail = (process.stderr or process.stdout or 'unknown ffmpeg error')[-3000:]
+        raise RuntimeError(f'Command failed: {command}\n{error_tail}')
+
+
+def fail_job(redis: Redis, key: str, error: Exception) -> None:
+    error_text = str(error)[-4000:]
+    traceback_text = traceback.format_exc()[-8000:]
+    redis.hset(
+        key,
+        mapping={
+            'status': 'failed',
+            'progress': '100',
+            'log': 'failed',
+            'error': error_text,
+            'traceback': traceback_text,
+        },
+    )
+
+
+def set_progress(redis: Redis, key: str, progress: int, log: str) -> None:
+    redis.hset(key, mapping={'status': 'processing', 'progress': str(progress), 'log': log})
 
 
 def burn_subtitles(input_path: str, ass_path: str, output_path: str) -> None:
@@ -32,96 +54,116 @@ def burn_subtitles(input_path: str, ass_path: str, output_path: str) -> None:
 def render_job(job_id: str) -> None:
     redis = Redis.from_url(REDIS_URL)
     key = f'job:{job_id}'
-    data = redis.hgetall(key)
-    if not data:
-        raise RuntimeError('job not found')
 
-    job = {k.decode(): v.decode() for k, v in data.items()}
-    video_path = job['video_path']
-    music_path = job.get('music_path') or ''
-    output_path = job['output_path']
-    target_seconds = int(job.get('target_seconds', '30'))
-    platform = job.get('platform', 'shorts')
-    color_enabled = job.get('color_enabled', 'true') == 'true'
-    color_preset = job.get('color_preset', 'dark_cinema')
-    subtitle_enabled = job.get('subtitle_enabled', 'false') == 'true'
-    subtitle_language = job.get('subtitle_language', 'auto')
-    subtitle_style = job.get('subtitle_style', 'cinematic')
-    centering_enabled = job.get('centering_enabled', 'true') == 'true'
-    transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
-    transition_style = job.get('transition_style', 'glitch')
-    effects_enabled = job.get('effects_enabled', 'true') == 'true'
-    effect_intensity = job.get('effect_intensity', 'medium')
-    focus_prompt = job.get('focus_prompt') or 'TELONYX CINEMA'
+    try:
+        data = redis.hgetall(key)
+        if not data:
+            raise RuntimeError('job not found')
 
-    out_dir = Path(output_path).parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+        job = {k.decode(): v.decode() for k, v in data.items()}
+        video_path = job['video_path']
+        music_path = job.get('music_path') or ''
+        output_path = job['output_path']
+        target_seconds = int(job.get('target_seconds', '30'))
+        platform = job.get('platform', 'shorts')
+        color_enabled = job.get('color_enabled', 'true') == 'true'
+        color_preset = job.get('color_preset', 'dark_cinema')
+        subtitle_enabled = job.get('subtitle_enabled', 'false') == 'true'
+        subtitle_language = job.get('subtitle_language', 'auto')
+        subtitle_style = job.get('subtitle_style', 'cinematic')
+        centering_enabled = job.get('centering_enabled', 'true') == 'true'
+        transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
+        transition_style = job.get('transition_style', 'glitch')
+        effects_enabled = job.get('effects_enabled', 'true') == 'true'
+        effect_intensity = job.get('effect_intensity', 'medium')
+        focus_prompt = job.get('focus_prompt') or 'TELONYX CINEMA'
 
-    render_summary = {
-        'platform': platform,
-        'target_seconds': target_seconds,
-        'focus_prompt': focus_prompt,
-        'music_enabled': bool(music_path),
-        'color_enabled': color_enabled,
-        'color_preset': color_preset,
-        'subtitle_enabled': subtitle_enabled,
-        'subtitle_language': subtitle_language,
-        'subtitle_style': subtitle_style,
-        'centering_enabled': centering_enabled,
-        'transitions_enabled': transitions_enabled,
-        'transition_style': transition_style,
-        'effects_enabled': effects_enabled,
-        'effect_intensity': effect_intensity,
-    }
-    redis.hset(key, mapping={'render_summary': json.dumps(render_summary, ensure_ascii=False)})
+        if not Path(video_path).exists():
+            raise RuntimeError(f'input video not found: {video_path}')
+        if music_path and not Path(music_path).exists():
+            raise RuntimeError(f'music file not found: {music_path}')
 
-    redis.hset(key, mapping={'status': 'processing', 'progress': '8', 'log': 'detecting beats'})
-    if music_path:
-        beats = detect_beats(music_path)
-        save_beats(str(out_dir / 'beats.txt'), beats)
-    else:
-        beats = []
+        out_dir = Path(output_path).parent
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    redis.hset(key, mapping={'progress': '18', 'log': 'analyzing scenes'})
-    segments = build_segments(video_path, target_seconds)
-    save_segments(str(out_dir / 'segments.json'), segments)
+        render_summary = {
+            'platform': platform,
+            'target_seconds': target_seconds,
+            'focus_prompt': focus_prompt,
+            'music_enabled': bool(music_path),
+            'color_enabled': color_enabled,
+            'color_preset': color_preset,
+            'subtitle_enabled': subtitle_enabled,
+            'subtitle_language': subtitle_language,
+            'subtitle_style': subtitle_style,
+            'centering_enabled': centering_enabled,
+            'transitions_enabled': transitions_enabled,
+            'transition_style': transition_style,
+            'effects_enabled': effects_enabled,
+            'effect_intensity': effect_intensity,
+        }
+        redis.hset(key, mapping={'render_summary': json.dumps(render_summary, ensure_ascii=False)})
 
-    redis.hset(key, mapping={'progress': '40', 'log': f'rendering {len(segments)} segments'})
-    concat_list = render_segments(
-        video_path=video_path,
-        segments=segments,
-        work_dir=str(out_dir / 'segments'),
-        enable_color=color_enabled,
-        color_preset=color_preset,
-        enable_centering=centering_enabled,
-        enable_effects=effects_enabled,
-        effect_intensity=effect_intensity,
-        transitions_enabled=transitions_enabled,
-        transition_style=transition_style,
-    )
+        set_progress(redis, key, 8, 'detecting beats')
+        if music_path:
+            beats = detect_beats(music_path)
+            save_beats(str(out_dir / 'beats.txt'), beats)
+        else:
+            beats = []
 
-    silent_path = str(out_dir / 'silent.mp4')
-    run_cmd(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', silent_path])
-    redis.hset(key, mapping={'progress': '78', 'log': 'video assembled'})
+        set_progress(redis, key, 18, 'analyzing scenes')
+        segments = build_segments(video_path, target_seconds)
+        if not segments:
+            raise RuntimeError('scene analyzer returned zero segments')
+        save_segments(str(out_dir / 'segments.json'), segments)
 
-    mixed_path = str(out_dir / 'mixed.mp4')
-    if music_path:
-        run_cmd([
-            'ffmpeg', '-y', '-stream_loop', '-1', '-i', music_path, '-i', silent_path,
-            '-t', str(target_seconds), '-map', '1:v:0', '-map', '0:a:0',
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', mixed_path,
-        ])
-        Path(silent_path).unlink(missing_ok=True)
-    else:
-        Path(silent_path).replace(mixed_path)
+        set_progress(redis, key, 40, f'rendering {len(segments)} segments')
+        concat_list = render_segments(
+            video_path=video_path,
+            segments=segments,
+            work_dir=str(out_dir / 'segments'),
+            enable_color=color_enabled,
+            color_preset=color_preset,
+            enable_centering=centering_enabled,
+            enable_effects=effects_enabled,
+            effect_intensity=effect_intensity,
+            transitions_enabled=transitions_enabled,
+            transition_style=transition_style,
+        )
 
-    if subtitle_enabled:
-        redis.hset(key, mapping={'progress': '90', 'log': 'building subtitles'})
-        ass_path = str(out_dir / 'subtitles.ass')
-        build_subtitles(mixed_path, ass_path, focus_prompt)
-        burn_subtitles(mixed_path, ass_path, output_path)
-        Path(mixed_path).unlink(missing_ok=True)
-    else:
-        Path(mixed_path).replace(output_path)
+        silent_path = str(out_dir / 'silent.mp4')
+        run_cmd(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', silent_path])
+        if not Path(silent_path).exists():
+            raise RuntimeError('silent render output was not created')
+        redis.hset(key, mapping={'progress': '78', 'log': 'video assembled'})
 
-    redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}, segments={len(segments)}'})
+        mixed_path = str(out_dir / 'mixed.mp4')
+        if music_path:
+            run_cmd([
+                'ffmpeg', '-y', '-stream_loop', '-1', '-i', music_path, '-i', silent_path,
+                '-t', str(target_seconds), '-map', '1:v:0', '-map', '0:a:0',
+                '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', mixed_path,
+            ])
+            Path(silent_path).unlink(missing_ok=True)
+        else:
+            Path(silent_path).replace(mixed_path)
+
+        if not Path(mixed_path).exists():
+            raise RuntimeError('mixed render output was not created')
+
+        if subtitle_enabled:
+            set_progress(redis, key, 90, 'building subtitles')
+            ass_path = str(out_dir / 'subtitles.ass')
+            build_subtitles(mixed_path, ass_path, focus_prompt)
+            burn_subtitles(mixed_path, ass_path, output_path)
+            Path(mixed_path).unlink(missing_ok=True)
+        else:
+            Path(mixed_path).replace(output_path)
+
+        if not Path(output_path).exists():
+            raise RuntimeError('final render output was not created')
+
+        redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}, segments={len(segments)}'})
+    except Exception as error:
+        fail_job(redis, key, error)
+        raise
