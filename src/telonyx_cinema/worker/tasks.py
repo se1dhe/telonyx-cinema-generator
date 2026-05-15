@@ -9,6 +9,7 @@ from pathlib import Path
 from redis import Redis
 
 from telonyx_cinema.pipeline.beat_detector import detect_beats, save_beats
+from telonyx_cinema.pipeline.beat_sync import align_segments_to_beats, build_relative_beat_grid
 from telonyx_cinema.pipeline.concat_builder import render_segments
 from telonyx_cinema.pipeline.input_normalizer import normalize_input_video
 from telonyx_cinema.pipeline.scene_analyzer import build_segments, save_segments
@@ -90,6 +91,8 @@ def render_job(job_id: str) -> None:
         centering_enabled = job.get('centering_enabled', 'true') == 'true'
         transitions_enabled = job.get('transitions_enabled', 'true') == 'true'
         transition_style = job.get('transition_style', 'glitch')
+        beat_sync = job.get('beat_sync', 'soft')
+        music_start_seconds = float(job.get('music_start_seconds', '0') or 0)
         effects_enabled = job.get('effects_enabled', 'true') == 'true'
         effect_intensity = job.get('effect_intensity', 'medium')
         focus_prompt = job.get('focus_prompt') or 'TELONYX CINEMA'
@@ -107,6 +110,8 @@ def render_job(job_id: str) -> None:
             'target_seconds': target_seconds,
             'focus_prompt': focus_prompt,
             'music_enabled': bool(music_path),
+            'music_start_seconds': music_start_seconds,
+            'beat_sync': beat_sync,
             'color_enabled': color_enabled,
             'color_preset': color_preset,
             'subtitle_enabled': subtitle_enabled,
@@ -129,16 +134,22 @@ def render_job(job_id: str) -> None:
         if music_path:
             beats = detect_beats(music_path)
             save_beats(str(out_dir / 'beats.txt'), beats)
+            relative_beats = build_relative_beat_grid(beats, target_seconds, music_start_seconds)
+            save_beats(str(out_dir / 'relative_beats.txt'), relative_beats)
         else:
             beats = []
+            relative_beats = []
 
         set_progress(redis, key, 22, 'analyzing scenes')
         segments = build_segments(video_path, target_seconds)
         if not segments:
             raise RuntimeError('scene analyzer returned zero segments')
+        segments = align_segments_to_beats(segments, relative_beats, target_seconds, beat_sync)
+        if not segments:
+            raise RuntimeError('beat sync returned zero segments')
         save_segments(str(out_dir / 'segments.json'), segments)
 
-        set_progress(redis, key, 42, f'rendering {len(segments)} segments')
+        set_progress(redis, key, 42, f'rendering {len(segments)} beat-synced segments')
         concat_list = render_segments(
             video_path=video_path,
             segments=segments,
@@ -161,8 +172,12 @@ def render_job(job_id: str) -> None:
         mixed_path = str(out_dir / 'mixed.mp4')
         if music_path:
             run_cmd([
-                'ffmpeg', '-y', '-stream_loop', '-1', '-i', music_path, '-i', silent_path,
-                '-t', str(target_seconds), '-map', '1:v:0', '-map', '0:a:0',
+                'ffmpeg', '-y',
+                '-ss', str(music_start_seconds),
+                '-stream_loop', '-1', '-i', music_path,
+                '-i', silent_path,
+                '-t', str(target_seconds),
+                '-map', '1:v:0', '-map', '0:a:0',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', mixed_path,
             ])
             Path(silent_path).unlink(missing_ok=True)
