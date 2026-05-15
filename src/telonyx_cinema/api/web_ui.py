@@ -25,6 +25,7 @@ def render_home_page() -> str:
     .stat { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:18px; }
     .stat div { padding:14px; border-radius:18px; background:#090a10; border:1px solid rgba(255,255,255,.08); }
     .stat b { display:block; font-size:22px; }
+    .hint { color:#71717a; font-size:12px; margin-top:8px; }
     @media(max-width:900px){ .hero{grid-template-columns:1fr;} h1{font-size:42px;} }
   </style>
 </head>
@@ -48,6 +49,8 @@ def render_home_page() -> str:
             <label>Язык субтитров<select name="subtitle_language"><option value="auto">Auto</option><option value="ru">Русский</option><option value="en">English</option><option value="uk">Українська</option></select></label>
             <label>Цвет<select name="color_preset"><option value="dark_cinema">Dark Cinema</option><option value="cyberpunk_neon">Cyberpunk Neon</option><option value="vader_red">Vader Red</option><option value="drive_night">Drive Night</option><option value="neutral">Neutral</option></select></label>
             <label>Переходы<select name="transition_style"><option value="glitch">Glitch</option><option value="flash">Flash</option><option value="whip">Whip</option><option value="tape">Tape</option><option value="hard_cut">Hard Cut</option></select></label>
+            <label>Интенсивность эффектов<select name="effect_intensity"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="none">None</option></select></label>
+            <label>Стиль субтитров<select name="subtitle_style"><option value="cinematic">Cinematic</option><option value="dialogue">Dialogue</option><option value="aggressive">Aggressive</option><option value="minimal">Minimal</option></select></label>
           </div>
           <div class="checks">
             <label class="check"><input type="checkbox" name="subtitle_enabled"> Субтитры</label>
@@ -57,6 +60,7 @@ def render_home_page() -> str:
             <label class="check"><input type="checkbox" name="effects_enabled" checked> Эффекты</label>
             <label class="check"><input type="checkbox" name="beat_sync_enabled" checked> Beat Sync</label>
           </div>
+          <p class="hint">Первый Railway-тест лучше запускать без Whisper-субтитров: быстрее проверим рендер, очередь и скачивание.</p>
           <button type="submit">Создать премиальный edit</button>
         </form>
       </section>
