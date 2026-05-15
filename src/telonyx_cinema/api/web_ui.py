@@ -33,10 +33,10 @@ def render_home_page() -> str:
   <div class="wrap">
     <div class="hero">
       <section class="card">
-        <span class="badge">AI post-production для movie edits</span>
-        <h1>Черновик фильма → премиальный vertical edit</h1>
-        <p>Загрузи черновую нарезку, добавь трек, выбери старт трека, beat-sync, цвет, переходы и центрирование. Worker соберёт готовый TikTok / Shorts / Reels ролик.</p>
-        <div class="stat"><div><b>9:16</b><span>1080x1920</span></div><div><b>AI</b><span>YOLO + OpenCV</span></div><div><b>FFmpeg</b><span>render core</span></div></div>
+        <span class="badge">Premium AI post-production</span>
+        <h1>Черновик фильма → beat-synced vertical edit</h1>
+        <p>Preset-based монтаж: xfade/filter_complex, speed ramp, impact zoom/shake, музыкальные пики, intro/dialogue/action режимы и debug timeline.</p>
+        <div class="stat"><div><b>9:16</b><span>1080x1920</span></div><div><b>AI</b><span>YOLO + OpenCV</span></div><div><b>FX</b><span>xfade + speed ramp</span></div></div>
       </section>
       <section class="card">
         <form id="form">
@@ -45,8 +45,10 @@ def render_home_page() -> str:
           <div class="grid">
             <label>Персонаж / фокус<input name="focus_prompt" placeholder="Дарт Вейдер"></label>
             <label>Длительность<input type="number" name="target_seconds" value="30" min="5" max="180"></label>
+            <label>Premium Preset<select name="edit_preset"><option value="cinematic" selected>Cinematic</option><option value="aggressive">Aggressive</option><option value="sad">Sad / Loneliness</option><option value="cyberpunk">Cyberpunk</option></select></label>
+            <label>Mode<select name="edit_mode"><option value="action" selected>Action Cut</option><option value="intro">Intro + Action</option><option value="dialogue">Dialogue Intro + Action</option></select></label>
             <label>Старт музыки, сек<input type="number" name="music_start_seconds" value="0" min="0" max="600" step="0.1"></label>
-            <label>Beat Sync<select name="beat_sync"><option value="soft" selected>Soft</option><option value="strict">Strict</option><option value="off">Off</option></select></label>
+            <label>Beat Sync<select name="beat_sync"><option value="soft">Soft</option><option value="strict" selected>Strict</option><option value="off">Off</option></select></label>
             <label>Платформа<select name="platform"><option value="shorts">YouTube Shorts</option><option value="tiktok">TikTok</option><option value="reels">Reels</option></select></label>
             <label>Язык субтитров<select name="subtitle_language"><option value="auto">Auto</option><option value="ru">Русский</option><option value="en">English</option><option value="uk">Українська</option></select></label>
             <label>Цвет<select name="color_preset"><option value="dark_cinema">Dark Cinema</option><option value="cyberpunk_neon">Cyberpunk Neon</option><option value="vader_red">Vader Red</option><option value="drive_night">Drive Night</option><option value="neutral">Neutral</option></select></label>
@@ -57,12 +59,12 @@ def render_home_page() -> str:
           <div class="checks">
             <label class="check"><input type="checkbox" name="subtitle_enabled"> Субтитры</label>
             <label class="check"><input type="checkbox" name="color_enabled" checked> Цветокор</label>
-            <label class="check"><input type="checkbox" name="transitions_enabled" checked> Переходы</label>
+            <label class="check"><input type="checkbox" name="transitions_enabled" checked> Xfade/переходы</label>
             <label class="check"><input type="checkbox" name="centering_enabled" checked> Центрирование</label>
             <label class="check"><input type="checkbox" name="effects_enabled" checked> Эффекты</label>
           </div>
-          <p class="hint">Для эдитов бери старт музыки с дропа/сильного момента. Например: 16.0, 42.5, 132.0.</p>
-          <button type="submit">Создать премиальный edit</button>
+          <p class="hint">Для premium cuts ставь старт музыки на дроп. Aggressive/Cyberpunk лучше с Glitch + Strict. Sad лучше с Tape + Soft.</p>
+          <button type="submit">Создать premium edit</button>
         </form>
       </section>
     </div>
