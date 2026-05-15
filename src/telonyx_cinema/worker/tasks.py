@@ -1,6 +1,8 @@
 import json
 import os
+import socket
 import subprocess
+import time
 import traceback
 from pathlib import Path
 
@@ -12,6 +14,18 @@ from telonyx_cinema.pipeline.scene_analyzer import build_segments, save_segments
 from telonyx_cinema.pipeline.whisper_subtitles import build_subtitles
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+
+
+def update_worker_heartbeat(redis: Redis, status: str, job_id: str | None = None) -> None:
+    mapping = {
+        'status': status,
+        'host': socket.gethostname(),
+        'updated_at': str(int(time.time())),
+        'queue': 'render',
+    }
+    if job_id:
+        mapping['job_id'] = job_id
+    redis.hset('worker:heartbeat', mapping=mapping)
 
 
 def run_cmd(cmd: list[str]) -> None:
@@ -54,6 +68,7 @@ def burn_subtitles(input_path: str, ass_path: str, output_path: str) -> None:
 def render_job(job_id: str) -> None:
     redis = Redis.from_url(REDIS_URL)
     key = f'job:{job_id}'
+    update_worker_heartbeat(redis, 'processing', job_id)
 
     try:
         data = redis.hgetall(key)
@@ -164,6 +179,8 @@ def render_job(job_id: str) -> None:
             raise RuntimeError('final render output was not created')
 
         redis.hset(key, mapping={'status': 'done', 'progress': '100', 'log': f'done, beats={len(beats)}, segments={len(segments)}'})
+        update_worker_heartbeat(redis, 'idle', job_id)
     except Exception as error:
         fail_job(redis, key, error)
+        update_worker_heartbeat(redis, 'failed', job_id)
         raise
