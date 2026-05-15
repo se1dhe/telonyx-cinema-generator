@@ -2,6 +2,7 @@ from telonyx_cinema.pipeline.color_presets import get_color_filter
 from telonyx_cinema.pipeline.crop_math import crop_x_expr
 from telonyx_cinema.pipeline.effect_presets import get_effect_filter
 from telonyx_cinema.pipeline.focus_detector import detect_focus_center
+from telonyx_cinema.pipeline.segment_effects import build_segment_transition_filter
 from telonyx_cinema.pipeline.video_probe import probe_size
 
 
@@ -13,6 +14,8 @@ def build_smart_filter(
     enable_centering: bool = True,
     enable_effects: bool = True,
     effect_intensity: str = 'medium',
+    transitions_enabled: bool = True,
+    transition_style: str = 'glitch',
 ) -> str:
     width, height = probe_size(video_path)
     center_x = width / 2.0
@@ -31,8 +34,12 @@ def build_smart_filter(
 
     color = get_color_filter(color_preset, enable_color)
     effect = get_effect_filter(enable_effects, effect_intensity)
+    transition = build_segment_transition_filter(transition_style, transitions_enabled, float(segment.get('duration', 1.0)))
+
     if color:
         filters.append(color)
     if effect:
         filters.append(effect)
+    if transition:
+        filters.append(transition)
     return ','.join(filters)
