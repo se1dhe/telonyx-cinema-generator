@@ -18,6 +18,7 @@ async def create_job_handler(
     focus_prompt: str = Form(default=''),
     target_seconds: int = Form(default=30),
     enable_color: bool = Form(default=True),
+    enable_subtitles: bool = Form(default=False),
 ):
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
@@ -40,6 +41,7 @@ async def create_job_handler(
         'focus_prompt': focus_prompt,
         'target_seconds': str(target_seconds),
         'enable_color': str(enable_color).lower(),
+        'enable_subtitles': str(enable_subtitles).lower(),
         'video_path': str(video_path),
         'music_path': music_path,
         'output_path': str(output_path),
