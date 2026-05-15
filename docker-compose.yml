@@ -1,41 +1,66 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: telonyx_autoedit
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
   redis:
     image: redis:7-alpine
+    container_name: telonyx-cinema-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
 
   api:
-    build: .
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8080
-    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telonyx-cinema-api
+    depends_on:
+      - redis
     ports:
       - "8080:8080"
+    environment:
+      PORT: 8080
+      PYTHONPATH: /app/src
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/storage
+      ENABLE_YOLO: "true"
+      ENABLE_BEAT_DETECT: "true"
+      ENABLE_WHISPER: "false"
+      ENABLE_CLIP: "false"
+      MODEL_DEVICE: cpu
+      COMPUTE_TYPE: int8
+      YOLO_MODEL: yolov8n.pt
+      WHISPER_MODEL: base
+      MAX_UPLOAD_MB: 1200
+      RQ_JOB_TIMEOUT_SECONDS: 1800
     volumes:
-      - ./storage:/data/storage
-    depends_on:
-      - postgres
-      - redis
+      - storage-data:/data/storage
+    command: uvicorn telonyx_cinema.api.main:app --host 0.0.0.0 --port 8080
 
   worker:
-    build: .
-    command: python -m worker.run_worker
-    env_file: .env
-    volumes:
-      - ./storage:/data/storage
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telonyx-cinema-worker
     depends_on:
-      - postgres
       - redis
+    environment:
+      PYTHONPATH: /app/src
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data/storage
+      ENABLE_YOLO: "true"
+      ENABLE_BEAT_DETECT: "true"
+      ENABLE_WHISPER: "false"
+      ENABLE_CLIP: "false"
+      MODEL_DEVICE: cpu
+      COMPUTE_TYPE: int8
+      YOLO_MODEL: yolov8n.pt
+      WHISPER_MODEL: base
+      MAX_UPLOAD_MB: 1200
+      RQ_JOB_TIMEOUT_SECONDS: 1800
+    volumes:
+      - storage-data:/data/storage
+    command: python -m telonyx_cinema.worker.main
 
 volumes:
-  pgdata:
+  redis-data:
+  storage-data:
