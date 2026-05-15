@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 from redis import Redis
@@ -8,12 +9,20 @@ STORAGE_DIR = Path(os.getenv('STORAGE_DIR', '/data/storage'))
 
 
 def diagnostics_handler():
+    redis = None
     redis_ok = False
     redis_error = ''
+    worker_heartbeat = {}
+    worker_seen_seconds_ago = None
+
     try:
         redis = Redis.from_url(REDIS_URL)
         redis.ping()
         redis_ok = True
+        raw_heartbeat = redis.hgetall('worker:heartbeat')
+        worker_heartbeat = {k.decode(): v.decode() for k, v in raw_heartbeat.items()}
+        if worker_heartbeat.get('updated_at'):
+            worker_seen_seconds_ago = int(time.time()) - int(worker_heartbeat['updated_at'])
     except Exception as error:
         redis_error = str(error)[-1000:]
 
@@ -35,6 +44,8 @@ def diagnostics_handler():
         'storage_dir': str(STORAGE_DIR),
         'storage_ok': storage_ok,
         'storage_error': storage_error,
+        'worker_heartbeat': worker_heartbeat,
+        'worker_seen_seconds_ago': worker_seen_seconds_ago,
         'env': {
             'ENABLE_YOLO': os.getenv('ENABLE_YOLO', ''),
             'ENABLE_BEAT_DETECT': os.getenv('ENABLE_BEAT_DETECT', ''),
