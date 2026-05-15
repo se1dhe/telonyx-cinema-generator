@@ -1,63 +1,63 @@
 # Railway Deploy
 
-## Target architecture
+## MVP architecture
 
-Create two Railway services from the same GitHub repository:
+For the first Railway launch use one service only:
 
-- `telonyx-cinema-api`
-- `telonyx-cinema-worker`
+- `telonyx-cinema-generator` web service
+- Railway Redis plugin
+- one persistent volume mounted to `/data/storage`
 
-Add one Redis plugin and one shared persistent volume mounted to both services.
+The Docker container starts both processes:
 
-## API service
+- FastAPI web API
+- RQ Worker
+
+This avoids cross-service shared-volume issues during the first MVP deploy.
+
+## Service
+
+Create one Railway service from this GitHub repository.
 
 Use Dockerfile build.
 
-Start command:
+The Dockerfile already starts:
 
 ```bash
-uvicorn telonyx_cinema.api.main:app --host 0.0.0.0 --port $PORT
+/app/scripts/railway_start.sh
 ```
 
-Expose public domain only for this service.
-
-## Worker service
-
-Use the same Dockerfile build.
-
-Start command:
+You can leave Railway Start Command empty. If Railway requires a start command, use:
 
 ```bash
-python -m telonyx_cinema.worker.main
+/app/scripts/railway_start.sh
 ```
 
-Do not expose public domain for worker.
+Expose public domain for this service.
 
 ## Redis
 
-Add Railway Redis plugin and set this variable on both API and Worker:
+Add Railway Redis plugin and set:
 
 ```env
 REDIS_URL=${{Redis.REDIS_URL}}
 ```
 
-## Shared storage volume
+## Storage volume
 
-Mount the same Railway volume to both API and Worker at:
+Mount a Railway volume to this service at:
 
 ```text
 /data/storage
 ```
 
-Set on both services:
+Set:
 
 ```env
 STORAGE_DIR=/data/storage
 ```
 
-If API and Worker do not share the same volume, worker will fail with `input video not found`.
-
-## Required env on both services
+## Required env
 
 ```env
 PYTHONPATH=/app/src
@@ -97,7 +97,7 @@ Expected:
 }
 ```
 
-If `worker_heartbeat` is empty, the worker service is not connected to the same Redis or did not start.
+If `worker_heartbeat` is empty, the background worker did not start inside the container.
 
 ## First production test
 
@@ -117,7 +117,7 @@ Whisper: disabled
 
 Steps:
 
-1. Open API service URL.
+1. Open Railway public URL.
 2. Upload a short rough movie edit.
 3. Upload a music track.
 4. Select 15-20 seconds.
@@ -136,6 +136,15 @@ python -m telonyx_cinema.maintenance.cleanup
 ```
 
 It removes old job folders from `/data/storage` using `MAX_JOB_AGE_HOURS`.
+
+## Later production architecture
+
+After the MVP is stable, split into two Railway services:
+
+- API service
+- Worker service
+
+But then file storage should be moved to S3/R2, not shared local volume.
 
 ## Notes
 
