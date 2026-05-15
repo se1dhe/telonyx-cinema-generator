@@ -7,10 +7,12 @@ from fastapi.responses import FileResponse
 from redis import Redis
 from rq import Queue
 
+from telonyx_cinema.api.upload_validation import ensure_saved_size, validate_audio_upload, validate_video_upload
 from telonyx_cinema.config.render_options import RenderOptions, options_to_redis_mapping
 
 STORAGE_DIR = Path(os.getenv('STORAGE_DIR', '/data/storage'))
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+RQ_JOB_TIMEOUT_SECONDS = int(os.getenv('RQ_JOB_TIMEOUT_SECONDS', '1800'))
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -31,17 +33,26 @@ async def create_job_handler(
     effects_enabled: bool = Form(default=True),
     effect_intensity: str = Form(default='medium'),
 ):
+    validate_video_upload(video)
+    if music and music.filename:
+        validate_audio_upload(music)
+
+    if target_seconds < 5 or target_seconds > 180:
+        raise HTTPException(status_code=400, detail='target_seconds must be between 5 and 180')
+
     job_id = str(uuid.uuid4())
     job_dir = STORAGE_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     video_path = job_dir / 'rough_cut.mp4'
     video_path.write_bytes(await video.read())
+    ensure_saved_size(video_path, 'Video')
 
     music_path = ''
     if music and music.filename:
-        music_file = job_dir / 'music.mp3'
+        music_file = job_dir / 'music' + Path(music.filename).suffix.lower()
         music_file.write_bytes(await music.read())
+        ensure_saved_size(music_file, 'Music')
         music_path = str(music_file)
 
     options = RenderOptions(
@@ -73,7 +84,13 @@ async def create_job_handler(
 
     redis = Redis.from_url(REDIS_URL)
     redis.hset(f'job:{job_id}', mapping=payload)
-    Queue('render', connection=redis).enqueue('telonyx_cinema.worker.tasks.render_job', job_id)
+    Queue('render', connection=redis).enqueue(
+        'telonyx_cinema.worker.tasks.render_job',
+        job_id,
+        job_timeout=RQ_JOB_TIMEOUT_SECONDS,
+        result_ttl=86400,
+        failure_ttl=86400,
+    )
     return {'job_id': job_id, 'status_url': f'/api/jobs/{job_id}'}
 
 
