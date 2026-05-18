@@ -1,147 +1,72 @@
-# TELONYX Cinema Generator
+# TELONYX Cinema Finalizer
 
-AI post-production web service for movie-based TikTok, Reels and YouTube Shorts edits.
+Новый формат проекта: сервис больше не генерирует нарезку из фильма.
 
-The user uploads a rough movie edit, uploads a music track, selects render options and receives a polished vertical 1080x1920 MP4.
+Теперь пайплайн такой:
 
-## Current status
+1. пользователь загружает уже готовый момент из фильма;
+2. указывает название фильма и год выхода;
+3. сервис делает вертикальный MP4 `1080x1920`;
+4. добавляет красивый выезжающий титр снизу слева в начале;
+5. ближе к концу титр уезжает обратно;
+6. при включённых субтитрах распознаёт речь через `faster-whisper`;
+7. прожигает ASS-субтитры в итоговое видео.
 
-Railway MVP is deploy-ready as a single Railway service:
+## Что отключено
 
-- FastAPI web service;
-- background RQ worker in the same container;
-- Redis/RQ queue;
-- single storage volume support;
-- web UI;
-- diagnostics endpoint;
-- worker heartbeat;
-- upload validation;
-- job timeout;
-- robust failed-state handling;
-- cleanup utility;
-- Dockerfile;
-- docker-compose local stack.
+Старые идеи про генерацию нарезок, Training Lab, YOLO, beat detector, Redis/RQ worker и сложный AI director больше не являются основным продуктом.
 
-## Railway MVP deploy
+Новый продукт — быстрый финализатор готовых Shorts/TikTok moments.
 
-Create one Railway service from this GitHub repository.
-
-The Dockerfile starts:
-
-```bash
-/app/scripts/railway_start.sh
-```
-
-Leave Railway Start Command empty, or set it to:
-
-```bash
-/app/scripts/railway_start.sh
-```
-
-Add Railway Redis plugin and set:
-
-```env
-REDIS_URL=${{Redis.REDIS_URL}}
-```
-
-Mount one volume to:
-
-```text
-/data/storage
-```
-
-## Required Railway environment variables
-
-```env
-PYTHONPATH=/app/src
-STORAGE_DIR=/data/storage
-REDIS_URL=${{Redis.REDIS_URL}}
-MAX_UPLOAD_MB=1200
-RQ_JOB_TIMEOUT_SECONDS=1800
-MAX_JOB_AGE_HOURS=48
-ENABLE_YOLO=true
-ENABLE_BEAT_DETECT=true
-ENABLE_WHISPER=false
-ENABLE_CLIP=false
-MODEL_DEVICE=cpu
-COMPUTE_TYPE=int8
-YOLO_MODEL=yolov8n.pt
-WHISPER_MODEL=base
-```
-
-## Diagnostics
-
-After deploy, open:
-
-```text
-/api/health
-/api/diagnostics
-```
-
-Expected:
-
-```json
-{
-  "redis_ok": true,
-  "storage_ok": true,
-  "worker_heartbeat": {
-    "queue": "render"
-  }
-}
-```
-
-## Local run
+## Локальный запуск
 
 ```bash
 chmod +x scripts/local_dev.sh
 ./scripts/local_dev.sh
 ```
 
-Open:
+Открыть:
 
 ```text
 http://localhost:8080
 http://localhost:8080/api/health
-http://localhost:8080/api/diagnostics
 ```
 
-## Current pipeline
+## Railway
 
-- Upload rough cut.
-- Upload music.
-- Validate upload size and extension.
-- Create Redis/RQ job with timeout.
-- Detect beats with librosa.
-- Analyze scene changes with FFmpeg.
-- Score motion with OpenCV.
-- Detect focus with local YOLO/OpenCV.
-- Smart vertical crop.
-- Render selected segments.
-- Apply color preset.
-- Apply effect preset.
-- Apply transition styling.
-- Add music.
-- Optionally burn ASS subtitles.
-- Download final MP4.
+Один сервис из репозитория.
 
-## Cleanup
-
-Manual cleanup:
-
-```bash
-python -m telonyx_cinema.maintenance.cleanup
+```env
+PORT=8080
+PYTHONPATH=/app/src
+STORAGE_DIR=/data/storage
+MAX_UPLOAD_MB=1200
+ENABLE_WHISPER=true
+WHISPER_MODEL=small
+MODEL_DEVICE=cpu
+COMPUTE_TYPE=int8
 ```
 
-## Later architecture
+Volume лучше монтировать в `/data/storage`.
 
-After the MVP is stable, split into API service and Worker service. At that point file storage should move to S3/R2 instead of local volume.
-
-## Project layout
-
-Main code lives in:
+## API
 
 ```text
-src/telonyx_cinema/
+GET  /
+GET  /api/health
+POST /api/jobs
+GET  /api/jobs/{job_id}
+GET  /api/jobs/{job_id}/download
 ```
 
-Do not add new production code to the repository root.
+`POST /api/jobs` принимает multipart form:
+
+```text
+video              файл видео
+movie_title        название фильма
+movie_year         год выхода
+language           auto / ru / en / uk
+subtitles_enabled  true / false
+```
+
+Если `ENABLE_WHISPER=false`, сервис всё равно сделает вертикальный ролик и титр, но автосубтитры будут пропущены.

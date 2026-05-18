@@ -1,66 +1,22 @@
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: telonyx-cinema-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
-
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: telonyx-cinema-api
-    depends_on:
-      - redis
+    container_name: telonyx-cinema-finalizer
     ports:
       - "8080:8080"
     environment:
       PORT: 8080
       PYTHONPATH: /app/src
-      REDIS_URL: redis://redis:6379/0
       STORAGE_DIR: /data/storage
-      ENABLE_YOLO: "true"
-      ENABLE_BEAT_DETECT: "true"
-      ENABLE_WHISPER: "false"
-      ENABLE_CLIP: "false"
+      MAX_UPLOAD_MB: 1200
+      ENABLE_WHISPER: "true"
+      WHISPER_MODEL: small
       MODEL_DEVICE: cpu
       COMPUTE_TYPE: int8
-      YOLO_MODEL: yolov8n.pt
-      WHISPER_MODEL: base
-      MAX_UPLOAD_MB: 1200
-      RQ_JOB_TIMEOUT_SECONDS: 1800
     volumes:
       - storage-data:/data/storage
-    command: uvicorn telonyx_cinema.api.main:app --host 0.0.0.0 --port 8080
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: telonyx-cinema-worker
-    depends_on:
-      - redis
-    environment:
-      PYTHONPATH: /app/src
-      REDIS_URL: redis://redis:6379/0
-      STORAGE_DIR: /data/storage
-      ENABLE_YOLO: "true"
-      ENABLE_BEAT_DETECT: "true"
-      ENABLE_WHISPER: "false"
-      ENABLE_CLIP: "false"
-      MODEL_DEVICE: cpu
-      COMPUTE_TYPE: int8
-      YOLO_MODEL: yolov8n.pt
-      WHISPER_MODEL: base
-      MAX_UPLOAD_MB: 1200
-      RQ_JOB_TIMEOUT_SECONDS: 1800
-    volumes:
-      - storage-data:/data/storage
-    command: python -m telonyx_cinema.worker.main
 
 volumes:
-  redis-data:
   storage-data:

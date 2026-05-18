@@ -1,15 +1,4 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 python-multipart==0.0.19
-redis==5.2.1
-rq==2.0.0
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
-ultralytics==8.3.40
-pillow==11.0.0
-python-dotenv==1.0.1
-aiofiles==24.1.0
-orjson==3.10.12
 faster-whisper==1.1.0
-librosa==0.10.2.post1
-scikit-learn==1.5.2

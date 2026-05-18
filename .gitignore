@@ -1,7 +1,6 @@
 __pycache__/
+*.pyc
+.venv/
 .env
-storage/
-*.mp4
-*.mov
-*.mp3
+.data/
 .DS_Store
