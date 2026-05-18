@@ -1,15 +1,15 @@
 import html
 import json
+import os
 import re
-from pathlib import Path
 from urllib.parse import unquote, urljoin
 
 import httpx
 
 TRUSTED_IMAGE_DOMAINS = {
+    "image.tmdb.org", "tmdb.org", "themoviedb.org",
     "starwars.com", "lucasfilm.com", "disney.com", "disneyplus.com",
     "imdb.com", "media-amazon.com", "m.media-amazon.com",
-    "tmdb.org", "themoviedb.org", "image.tmdb.org",
     "rottentomatoes.com", "fandango.com", "cinematerial.com", "impawards.com",
     "movieposters.com", "warnerbros.com", "universalpictures.com",
     "paramountpictures.com", "sonypictures.com", "20thcenturystudios.com",
@@ -27,6 +27,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/original"
 
 
 def _clean(value: str) -> str:
@@ -57,6 +59,13 @@ def _synonyms(p, movie_title: str) -> set[str]:
     return result
 
 
+def _year_matches(movie_year: str, date_value: str | None) -> bool:
+    year = str(movie_year or "").strip()
+    if not year or not date_value:
+        return True
+    return str(date_value).startswith(year)
+
+
 def apply(p):
     p.IMAGE_BLOCKLIST = set(getattr(p, "IMAGE_BLOCKLIST", set())) | EXTRA_BLOCKED
     p.TRUSTED_IMAGE_DOMAINS = TRUSTED_IMAGE_DOMAINS
@@ -67,7 +76,7 @@ def apply(p):
 
     def trusted_domain_score(url: str, context: str = "") -> int:
         haystack = f"{url} {context}".lower()
-        return 8 if any(domain in haystack for domain in TRUSTED_IMAGE_DOMAINS) else 0
+        return 10 if any(domain in haystack for domain in TRUSTED_IMAGE_DOMAINS) else 0
 
     def movie_synonyms(movie_title: str) -> set[str]:
         return _synonyms(p, movie_title)
@@ -90,18 +99,16 @@ def apply(p):
         if any(word in haystack for word in ["official", "press", "still", "trailer", "poster", "backdrop", "promo", "image", "photo", "exclusive"]):
             score += 3
         if any(word in haystack for word in ["imdb", "tmdb", "themoviedb", "starwars", "lucasfilm", "disney", "media amazon"]):
-            score += 4
-        # Для доверенных источников достаточно 1 совпадения по фильму или StarWars-сигнала.
+            score += 5
         if trusted_domain_score(url, context) and (hits >= 1 or any(x in haystack for x in synonyms)):
-            return max(score, 8)
-        # Для обычных источников требуем явный сигнал по названию.
+            return max(score, 10)
         if len(tokens) >= 2 and hits == 0 and not any(x in haystack for x in synonyms):
             return -10
-        if len(tokens) >= 3 and hits == 1 and not any(x in haystack for x in ["starwars", "lucasfilm", "disney", "imdb", "tmdb"]):
+        if len(tokens) >= 3 and hits == 1 and not any(x in haystack for x in ["starwars", "lucasfilm", "disney", "imdb", "tmdb", "themoviedb"]):
             return -5
         return score
 
-    def add_candidate(candidates: list[dict[str, str]], url: str | None, movie_title: str, context: str = "", source: str = "") -> None:
+    def add_candidate(candidates: list[dict[str, str]], url: str | None, movie_title: str, context: str = "", source: str = "", score_override: int | None = None) -> None:
         if not url:
             return
         url = html.unescape(unquote(url)).strip()
@@ -110,15 +117,80 @@ def apply(p):
         lowered = url.lower()
         if any(bad in lowered for bad in [".svg", "favicon", "logo", "sprite", "data:image", ".gif"]):
             return
-        score = image_relevance_score(url, context, movie_title)
+        score = score_override if score_override is not None else image_relevance_score(url, context, movie_title)
         if score < 4:
             return
         if any(item["url"] == url for item in candidates):
             return
         candidates.append({"url": url, "context": context, "source": source, "score": str(score)})
 
+    async def tmdb_image_candidates(movie_title: str, movie_year: str, limit: int = 12) -> tuple[list[dict[str, str]], dict[str, object]]:
+        """Основной стабильный источник: TMDb poster/backdrop по названию фильма."""
+        token = os.getenv("TMDB_API_KEY", "").strip() or os.getenv("TMDB_BEARER_TOKEN", "").strip()
+        debug: dict[str, object] = {"enabled": bool(token), "found": 0, "movie_id": None, "error": None}
+        if not token:
+            debug["error"] = "TMDB_API_KEY/TMDB_BEARER_TOKEN is not configured"
+            return [], debug
+        headers = dict(HEADERS)
+        # Поддерживаем оба варианта: v4 Bearer token и v3 api_key.
+        use_bearer = len(token) > 40 or token.startswith("ey")
+        if use_bearer:
+            headers["Authorization"] = f"Bearer {token}"
+        params = {"query": movie_title, "include_adult": "false", "language": "en-US"}
+        if str(movie_year or "").strip():
+            params["year"] = str(movie_year).strip()
+        if not use_bearer:
+            params["api_key"] = token
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+                search = await client.get("https://api.themoviedb.org/3/search/movie", params=params)
+                search.raise_for_status()
+                search_data = search.json()
+                results = search_data.get("results") or []
+                if not results and params.get("year"):
+                    params.pop("year", None)
+                    search = await client.get("https://api.themoviedb.org/3/search/movie", params=params)
+                    search.raise_for_status()
+                    results = (search.json()).get("results") or []
+                if not results:
+                    debug["error"] = "TMDb movie not found"
+                    return [], debug
+                tokens = set(_title_tokens(p, movie_title))
+                def rank(item: dict) -> tuple[int, float]:
+                    title = _clean(" ".join([str(item.get("title") or ""), str(item.get("original_title") or "")]))
+                    hit_count = sum(1 for token in tokens if token in title)
+                    year_bonus = 5 if _year_matches(movie_year, item.get("release_date")) else 0
+                    return (hit_count * 10 + year_bonus, float(item.get("popularity") or 0))
+                movie = sorted(results, key=rank, reverse=True)[0]
+                movie_id = movie.get("id")
+                debug["movie_id"] = movie_id
+                context = f'{movie.get("title", movie_title)} {movie.get("original_title", "")} {movie.get("release_date", "")} tmdb themoviedb'
+                candidates: list[dict[str, str]] = []
+                for key, score in [("backdrop_path", 50), ("poster_path", 45)]:
+                    path = movie.get(key)
+                    if path:
+                        add_candidate(candidates, f"{TMDB_IMAGE_BASE}{path}", movie_title, context=context, source="tmdb-search", score_override=score)
+                params_images = {"language": "en,null"}
+                if not use_bearer:
+                    params_images["api_key"] = token
+                images_response = await client.get(f"https://api.themoviedb.org/3/movie/{movie_id}/images", params=params_images)
+                images_response.raise_for_status()
+                images = images_response.json()
+                for item in (images.get("backdrops") or [])[:8]:
+                    path = item.get("file_path")
+                    if path:
+                        add_candidate(candidates, f"{TMDB_IMAGE_BASE}{path}", movie_title, context=context, source="tmdb-backdrop", score_override=48)
+                for item in (images.get("posters") or [])[:6]:
+                    path = item.get("file_path")
+                    if path:
+                        add_candidate(candidates, f"{TMDB_IMAGE_BASE}{path}", movie_title, context=context, source="tmdb-poster", score_override=44)
+                debug["found"] = len(candidates)
+                return candidates[:limit], debug
+        except Exception as exc:
+            debug["error"] = str(exc)
+            return [], debug
+
     async def ddg_web_page_candidates(query: str, movie_title: str, limit: int = 12) -> list[dict[str, str]]:
-        """Ищем обычные страницы и достаём из них og:image/twitter:image."""
         pages: list[dict[str, str]] = []
         try:
             async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=HEADERS) as client:
@@ -162,19 +234,6 @@ def apply(p):
                     ]
                     for pattern in patterns:
                         images.extend(re.findall(pattern, body, flags=re.I))
-                    for script in re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', body, flags=re.I | re.S):
-                        try:
-                            data = json.loads(html.unescape(script.strip()))
-                            stack = data if isinstance(data, list) else [data]
-                            for item in stack:
-                                if isinstance(item, dict):
-                                    img = item.get("image") or item.get("thumbnailUrl")
-                                    if isinstance(img, str):
-                                        images.append(img)
-                                    elif isinstance(img, list):
-                                        images.extend(str(x) for x in img if isinstance(x, str))
-                        except Exception:
-                            pass
                     context = f'{page.get("context", "")} {page.get("url", "")}'
                     for image_url in images:
                         image_url = urljoin(page["url"], html.unescape(image_url))
@@ -183,7 +242,7 @@ def apply(p):
             return result
         return result
 
-    async def bing_image_candidates(query: str, movie_title: str, limit: int = 15) -> list[dict[str, str]]:
+    async def bing_image_candidates(query: str, movie_title: str, limit: int = 20) -> list[dict[str, str]]:
         candidates: list[dict[str, str]] = []
         try:
             async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=HEADERS) as client:
@@ -268,19 +327,26 @@ def apply(p):
             "queries": [],
             "search_queries": search_queries,
             "title_tokens": _title_tokens(p, movie_title),
+            "tmdb": None,
             "downloaded": 0,
             "fallback": 0,
             "blocked_keywords": sorted(p.IMAGE_BLOCKLIST),
-            "note": "Fallback cards are disabled for Telegram preview. Only real internet images are accepted.",
+            "note": "TMDb is the primary provider. Fallback cards are disabled for Telegram preview.",
         }
-        for query in search_queries:
-            result = await search_image_candidates(query, movie_title)
-            debug["queries"].append({"query": query, "found": len(result["candidates"]), "sources": result["sources"]})
-            for item in result["candidates"]:
-                if not any(x["url"] == item["url"] for x in found):
-                    found.append(item)
-            if len(found) >= p.IMAGE_COUNT * 4:
-                break
+        tmdb_items, tmdb_debug = await tmdb_image_candidates(movie_title, movie_year, limit=16)
+        debug["tmdb"] = tmdb_debug
+        for item in tmdb_items:
+            if not any(x["url"] == item["url"] for x in found):
+                found.append(item)
+        if len(found) < p.IMAGE_COUNT:
+            for query in search_queries:
+                result = await search_image_candidates(query, movie_title)
+                debug["queries"].append({"query": query, "found": len(result["candidates"]), "sources": result["sources"]})
+                for item in result["candidates"]:
+                    if not any(x["url"] == item["url"] for x in found):
+                        found.append(item)
+                if len(found) >= p.IMAGE_COUNT * 4:
+                    break
         images = []
         used_urls = []
         cursor = 0
@@ -325,7 +391,7 @@ def apply(p):
         debug["final_image_count"] = len(images)
         debug["real_image_count"] = len(images)
         if len(images) < p.MIN_IMAGE_COUNT:
-            debug["error"] = "Not enough real movie images found. Fallback cards are disabled."
+            debug["error"] = "Not enough real movie images found. Configure TMDB_API_KEY for stable movie posters/backdrops."
         return images, debug
 
     async def generate_package_task(package_id: str) -> None:
@@ -335,10 +401,10 @@ def apply(p):
         try:
             p.update_package(package_id, {"status": "generating", "message": "Генерирую Telegram-caption через Gemini"})
             content = await p.generate_with_gemini(movie_title, movie_year)
-            p.update_package(package_id, {"message": "Ищу реальные 2-3 картинки фильма в интернете"})
+            p.update_package(package_id, {"message": "Ищу реальные 2-3 картинки фильма через TMDb и интернет"})
             images, image_debug = await create_internet_images(package_id, movie_title, movie_year, content.get("telegram_text_uk", ""), content.get("image_queries", []))
             status = "ready" if len(images) >= p.MIN_IMAGE_COUNT else "failed"
-            message = "Контент-пакет готов к предпросмотру" if status == "ready" else "Не удалось найти минимум 2 реальные картинки фильма. Попробуй перегенерацию или другое название."
+            message = "Контент-пакет готов к предпросмотру" if status == "ready" else "Не удалось найти минимум 2 реальные картинки фильма. Добавь TMDB_API_KEY в Railway или попробуй другое название."
             p.update_package(package_id, {
                 "status": status,
                 "message": message,
@@ -358,7 +424,7 @@ def apply(p):
                     "generated_by": content.get("generated_by"),
                     "gemini_error": content.get("gemini_error"),
                     "brand_style": p.BRAND_STYLE,
-                    "image_source": "real_web_images_og_and_image_search_no_fallback_cards",
+                    "image_source": "tmdb_first_real_movie_images_no_fallback_cards",
                     "telegram_mode": "single_album_post_caption",
                 },
             })
@@ -369,6 +435,7 @@ def apply(p):
     p.image_relevance_score = image_relevance_score
     p.movie_synonyms = movie_synonyms
     p.add_candidate = add_candidate
+    p.tmdb_image_candidates = tmdb_image_candidates
     p.bing_image_candidates = bing_image_candidates
     p.search_image_candidates = search_image_candidates
     p.build_search_queries_from_post = build_search_queries_from_post
