@@ -38,7 +38,16 @@ IMAGE_BLOCKLIST = {
     "tattoo", "tattoos", "tattooed", "sleeve", "ink", "mandala", "geometric",
     "arm", "forearm", "skin", "bodyart", "body-art", "design", "pinterest",
     "redbubble", "etsy", "teepublic", "wallpaperflare", "merchandise", "merch",
-    "fanart", "fan art", "fan-art", "shirt", "t-shirt", "hoodie", "poster print",
+    "fanart", "fan art", "fan-art", "fan_art", "shirt", "t-shirt", "hoodie",
+    "poster print", "cosplay", "cosplayer", "costume", "halloween", "deviantart",
+    "deviantart.net", "fandom", "fanpop", "aminoapps", "tumblr", "wattpad",
+    "zazzle", "society6", "displate", "wallpaper", "wallpapers", "pngtree",
+    "clipart", "sticker", "meme", "merry christmas", "christmas", "cartoon porn",
+}
+
+TITLE_TOKEN_STOP_WORDS = {
+    "the", "and", "for", "with", "from", "into", "movie", "film", "part", "chapter",
+    "official", "poster", "still", "trailer", "cast", "premiere", "cinema", "telonyx",
 }
 
 POST_SEARCH_STOP_WORDS = {
@@ -97,7 +106,6 @@ def update_package(package_id: str, patch: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_hashtag_list(value: Any) -> list[str]:
-    """Для hashtag-полей строку можно резать по пробелам/запятым."""
     if value is None:
         return []
     if isinstance(value, list):
@@ -117,7 +125,6 @@ def normalize_hashtag_list(value: Any) -> list[str]:
 
 
 def normalize_phrase_list(value: Any) -> list[str]:
-    """Для image_queries фразы нельзя резать по пробелам."""
     if value is None:
         return []
     if isinstance(value, list):
@@ -265,12 +272,23 @@ def create_fallback_image(target: Path, movie_title: str, movie_year: str, index
     Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(target, quality=93)
 
 
-def movie_keywords(movie_title: str) -> set[str]:
-    words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", movie_title) if len(w) >= 3}
-    words.update({"movie", "film", "poster", "trailer", "cast", "official", "premiere", "disney", "lucasfilm"})
-    if "mandalorian" in movie_title.lower() or "grogu" in movie_title.lower():
-        words.update({"mandalorian", "grogu", "star", "wars", "lucasfilm", "disney", "pedro", "pascal"})
-    return words
+def normalize_search_text(value: str) -> str:
+    value = html.unescape(unquote(value or "")).lower()
+    value = re.sub(r"[^a-z0-9а-яіїєґ]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def movie_title_tokens(movie_title: str) -> list[str]:
+    tokens = [token.lower() for token in re.findall(r"[a-zA-Z0-9а-яА-ЯіїІЇєЄґҐ]+", movie_title)]
+    result: list[str] = []
+    for token in tokens:
+        if len(token) < 3:
+            continue
+        if token in TITLE_TOKEN_STOP_WORDS:
+            continue
+        if token not in result:
+            result.append(token)
+    return result
 
 
 def is_blocked_image_candidate(url: str, context: str = "") -> bool:
@@ -281,9 +299,14 @@ def is_blocked_image_candidate(url: str, context: str = "") -> bool:
 def is_relevant_image_candidate(url: str, context: str, movie_title: str) -> bool:
     if is_blocked_image_candidate(url, context):
         return False
-    haystack = f"{url} {context}".lower()
-    keys = movie_keywords(movie_title)
-    return any(key in haystack for key in keys)
+    haystack = normalize_search_text(f"{url} {context}")
+    tokens = movie_title_tokens(movie_title)
+    if not tokens:
+        return False
+    hits = sum(1 for token in tokens if re.search(rf"\b{re.escape(token)}\b", haystack))
+    if len(tokens) == 1:
+        return hits == 1
+    return hits >= min(2, len(tokens))
 
 
 def add_candidate(candidates: list[dict[str, str]], url: str | None, movie_title: str, context: str = "", source: str = "") -> None:
@@ -351,7 +374,8 @@ async def bing_image_candidates(query: str, movie_title: str, limit: int = 8) ->
                 break
         if len(candidates) < limit:
             for match in re.finditer(r"murl&quot;:&quot;(.*?)&quot;", page):
-                add_candidate(candidates, match.group(1), movie_title, context=query, source="bing")
+                # Важно: не подставляем query как context, иначе мусор становится якобы релевантным.
+                add_candidate(candidates, match.group(1), movie_title, context="", source="bing")
                 if len(candidates) >= limit:
                     break
     except Exception:
@@ -438,7 +462,6 @@ async def download_image(url: str, target: Path) -> bool:
 
 
 def extract_post_search_phrases(telegram_text_uk: str, movie_title: str, movie_year: str) -> list[str]:
-    """Достаём короткие поисковые фразы из уже сгенерированного Telegram-поста."""
     text = telegram_text_uk or ""
     movie_title_lower = movie_title.lower().strip()
     movie_year_value = str(movie_year).strip()
@@ -486,7 +509,6 @@ def extract_post_search_phrases(telegram_text_uk: str, movie_title: str, movie_y
 
 
 def build_search_queries_from_post(movie_title: str, movie_year: str, telegram_text_uk: str, gemini_queries: list[str]) -> list[str]:
-    """Строим image-search запросы из названия фильма, года, Gemini и Telegram-поста."""
     base_title = movie_title.strip()
     year = str(movie_year).strip()
     title_with_year = f'"{base_title}" {year}'.strip()
@@ -496,6 +518,8 @@ def build_search_queries_from_post(movie_title: str, movie_year: str, telegram_t
         f'{title_with_year} cast premiere',
         f'"{base_title}" official trailer still',
         f'"{base_title}" behind the scenes',
+        f'"{base_title}" imdb still',
+        f'"{base_title}" tmdb backdrop',
     ]
     for query in gemini_queries or []:
         cleaned_query = str(query).strip()
@@ -504,7 +528,7 @@ def build_search_queries_from_post(movie_title: str, movie_year: str, telegram_t
     for phrase in extract_post_search_phrases(telegram_text_uk, movie_title, movie_year):
         if is_blocked_image_candidate(phrase):
             continue
-        result.extend([f'"{base_title}" "{phrase}"', f'"{base_title}" "{phrase}" movie still', f'"{base_title}" "{phrase}" cast'])
+        result.extend([f'"{base_title}" "{phrase}" movie still', f'"{base_title}" "{phrase}" cast'])
     if "mandalorian" in base_title.lower() or "grogu" in base_title.lower():
         result.extend([
             '"The Mandalorian and Grogu" official trailer still',
@@ -536,6 +560,7 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
     debug: dict[str, Any] = {
         "queries": [],
         "search_queries": search_queries,
+        "title_tokens": movie_title_tokens(movie_title),
         "post_phrases": extract_post_search_phrases(telegram_text_uk, movie_title, movie_year),
         "downloaded": 0,
         "fallback": 0,
@@ -652,8 +677,8 @@ async def generate_with_gemini(movie_title: str, movie_year: str) -> dict[str, A
 5. Обовʼязкові хештеги: #Історія #Факти #ЦікавоЗнати #TELONYXCinema
 6. Для TikTok і YouTube Shorts створи окремо title, description, hashtags.
 7. image_queries має бути JSON-масивом повних англійських фраз, НЕ окремих слів.
-8. Заборонено давати запити про tattoo, sleeve, ink, design, mandala, merchandise або фан-арт.
-9. Запити мають бути тільки про official poster, official trailer still, movie still, cast premiere, Lucasfilm/Disney press.
+8. Заборонено давати запити про tattoo, sleeve, ink, design, mandala, merchandise, cosplay або fan-art.
+9. Запити мають бути тільки про official poster, official trailer still, movie still, cast premiere, studio press materials.
 
 Поверни тільки валідний JSON з полями:
 telegram_text_uk, tiktok_title, tiktok_description, tiktok_hashtags,
@@ -718,7 +743,7 @@ async def generate_package_task(package_id: str) -> None:
                     "generated_by": content.get("generated_by"),
                     "gemini_error": content.get("gemini_error"),
                     "brand_style": BRAND_STYLE,
-                    "image_source": "post_based_filtered_image_search",
+                    "image_source": "post_based_strict_title_filtered_image_search",
                     "telegram_mode": "single_album_post_caption",
                 },
             },
