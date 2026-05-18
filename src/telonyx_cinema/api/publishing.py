@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, unquote
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -15,10 +15,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 # Publishing pipeline:
-# - текст генерирует Gemini;
-# - изображения берём из интернета, а не из исходного/готового видео;
-# - порядок поиска: DuckDuckGo Images -> Bing Images -> Wikimedia Commons -> fallback;
-# - в Telegram публикуем ОДИН album-пост: картинки + caption на первой картинке.
+# - Gemini генерирует украинский короткий caption и метаданные;
+# - картинки ищем в интернете, но строго фильтруем нерелевантный мусор;
+# - Telegram публикуется как один album-пост: картинки + caption на первой картинке.
 
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/data/storage"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -31,6 +30,12 @@ BRAND_STYLE = os.getenv("BRAND_STYLE", "dark_neon_cinematic").strip()
 TELEGRAM_CAPTION_LIMIT = 1024
 SAFE_CAPTION_LIMIT = 930
 IMAGE_COUNT = 5
+
+IMAGE_BLOCKLIST = {
+    "tattoo", "tattoos", "tattooed", "sleeve", "ink", "mandala", "geometric",
+    "arm", "forearm", "skin", "bodyart", "body-art", "design", "pinterest",
+    "redbubble", "etsy", "teepublic", "wallpaperflare",
+}
 
 router = APIRouter(tags=["publishing"])
 
@@ -77,21 +82,54 @@ def update_package(package_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def normalize_list(value: Any) -> list[str]:
+def normalize_hashtag_list(value: Any) -> list[str]:
+    """Для hashtag-полей строку можно резать по пробелам/запятым."""
     if value is None:
         return []
     if isinstance(value, list):
         result: list[str] = []
         for item in value:
-            result.extend(normalize_list(item))
+            result.extend(normalize_hashtag_list(item))
         return [x for x in result if x]
     if isinstance(value, dict):
         result: list[str] = []
         for item in value.values():
-            result.extend(normalize_list(item))
+            result.extend(normalize_hashtag_list(item))
         return [x for x in result if x]
     if isinstance(value, str):
         return [x.strip() for x in re.split(r"[\s,]+", value.strip()) if x.strip()]
+    value = str(value).strip()
+    return [value] if value else []
+
+
+def normalize_phrase_list(value: Any) -> list[str]:
+    """Для image_queries фразы нельзя резать по пробелам.
+
+    Именно из-за старой нормализации запрос "Star Wars The Mandalorian..."
+    превращался в отдельные слова, и image search улетал в мусор вроде tattoo.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(normalize_phrase_list(item))
+        return [x for x in result if x]
+    if isinstance(value, dict):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(normalize_phrase_list(item))
+        return [x for x in result if x]
+    if isinstance(value, str):
+        # Если Gemini вернул JSON-массив строкой, пробуем распарсить.
+        stripped = value.strip()
+        if stripped.startswith("["):
+            try:
+                return normalize_phrase_list(json.loads(stripped))
+            except Exception:
+                pass
+        # Разделяем только по строкам или точке с запятой, но не по пробелам.
+        return [x.strip(" \t\r\n,.-") for x in re.split(r"[\n;]+", stripped) if x.strip(" \t\r\n,.-")]
     value = str(value).strip()
     return [value] if value else []
 
@@ -102,11 +140,11 @@ def normalize_content(content: dict[str, Any]) -> dict[str, Any]:
         "telegram_text_uk": str(content.get("telegram_text_uk") or ""),
         "tiktok_title": str(content.get("tiktok_title") or ""),
         "tiktok_description": str(content.get("tiktok_description") or ""),
-        "tiktok_hashtags": normalize_list(content.get("tiktok_hashtags")),
+        "tiktok_hashtags": normalize_hashtag_list(content.get("tiktok_hashtags")),
         "youtube_title": str(content.get("youtube_title") or ""),
         "youtube_description": str(content.get("youtube_description") or ""),
-        "youtube_hashtags": normalize_list(content.get("youtube_hashtags")),
-        "image_queries": normalize_list(content.get("image_queries"))[:10],
+        "youtube_hashtags": normalize_hashtag_list(content.get("youtube_hashtags")),
+        "image_queries": normalize_phrase_list(content.get("image_queries"))[:10],
         "source_links": content.get("source_links") if isinstance(content.get("source_links"), list) else [],
     }
 
@@ -180,10 +218,10 @@ def style_internet_image(raw_image: Path, target: Path, index: int) -> None:
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 36))
-    draw.rectangle((0, height - 175, width, height), fill=(0, 0, 0, 95))
-    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 125), width=3)
-    draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 165))
+    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 32))
+    draw.rectangle((0, height - 175, width, height), fill=(0, 0, 0, 88))
+    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 120), width=3)
+    draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 155))
 
     small_font = load_font(24, bold=True)
     number_font = load_font(24, bold=True)
@@ -222,7 +260,28 @@ def create_fallback_image(target: Path, movie_title: str, movie_year: str, index
     Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(target, quality=93)
 
 
-def add_unique(urls: list[str], url: str | None) -> None:
+def movie_keywords(movie_title: str) -> set[str]:
+    words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", movie_title) if len(w) >= 3}
+    words.update({"movie", "film", "poster", "trailer", "cast", "official", "premiere", "disney", "lucasfilm"})
+    if "mandalorian" in movie_title.lower() or "grogu" in movie_title.lower():
+        words.update({"mandalorian", "grogu", "star", "wars", "lucasfilm", "disney", "pedro", "pascal"})
+    return words
+
+
+def is_blocked_image_candidate(url: str, context: str = "") -> bool:
+    haystack = f"{url} {context}".lower()
+    return any(bad in haystack for bad in IMAGE_BLOCKLIST)
+
+
+def is_relevant_image_candidate(url: str, context: str, movie_title: str) -> bool:
+    if is_blocked_image_candidate(url, context):
+        return False
+    haystack = f"{url} {context}".lower()
+    keys = movie_keywords(movie_title)
+    return any(key in haystack for key in keys)
+
+
+def add_candidate(candidates: list[dict[str, str]], url: str | None, movie_title: str, context: str = "", source: str = "") -> None:
     if not url:
         return
     url = html.unescape(unquote(url)).strip()
@@ -231,12 +290,15 @@ def add_unique(urls: list[str], url: str | None) -> None:
     lowered = url.lower()
     if any(bad in lowered for bad in [".svg", "favicon", "logo", "sprite", "data:image"]):
         return
-    if url not in urls:
-        urls.append(url)
+    if not is_relevant_image_candidate(url, context, movie_title):
+        return
+    if any(item["url"] == url for item in candidates):
+        return
+    candidates.append({"url": url, "context": context, "source": source})
 
 
-async def duckduckgo_image_urls(query: str, limit: int = 8) -> list[str]:
-    urls: list[str] = []
+async def duckduckgo_image_candidates(query: str, movie_title: str, limit: int = 8) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
@@ -247,24 +309,24 @@ async def duckduckgo_image_urls(query: str, limit: int = 8) -> list[str]:
             match = re.search(r"vqd=['\"]?([^'\"&]+)", html_page)
             if not match:
                 return []
-            vqd = match.group(1)
             response = await client.get(
                 "https://duckduckgo.com/i.js",
-                params={"l": "us-en", "o": "json", "q": query, "vqd": vqd, "f": ",,,", "p": "1"},
+                params={"l": "us-en", "o": "json", "q": query, "vqd": match.group(1), "f": ",,,", "p": "1"},
             )
             response.raise_for_status()
             data = response.json()
         for item in data.get("results", []):
-            add_unique(urls, item.get("image"))
-            if len(urls) >= limit:
+            context = " ".join(str(item.get(k, "")) for k in ["title", "source", "url"])
+            add_candidate(candidates, item.get("image"), movie_title, context=context, source="duckduckgo")
+            if len(candidates) >= limit:
                 break
     except Exception:
         return []
-    return urls
+    return candidates
 
 
-async def bing_image_urls(query: str, limit: int = 8) -> list[str]:
-    urls: list[str] = []
+async def bing_image_candidates(query: str, movie_title: str, limit: int = 8) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
@@ -272,21 +334,27 @@ async def bing_image_urls(query: str, limit: int = 8) -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=headers) as client:
             page = (await client.get("https://www.bing.com/images/search", params={"q": query, "form": "HDRSC2", "first": "1"})).text
-        for match in re.finditer(r"murl&quot;:&quot;(.*?)&quot;", page):
-            add_unique(urls, match.group(1))
-            if len(urls) >= limit:
+        for block in re.findall(r"m=\"(.*?)\"", page):
+            unescaped = html.unescape(block)
+            murl = re.search(r'"murl":"(.*?)"', unescaped)
+            t = re.search(r'"t":"(.*?)"', unescaped)
+            purl = re.search(r'"purl":"(.*?)"', unescaped)
+            context = " ".join(x.group(1) for x in [t, purl] if x)
+            if murl:
+                add_candidate(candidates, murl.group(1).encode("utf-8").decode("unicode_escape"), movie_title, context=context, source="bing")
+            if len(candidates) >= limit:
                 break
-        if len(urls) < limit:
-            for match in re.finditer(r'"murl":"(.*?)"', page):
-                add_unique(urls, match.group(1).encode("utf-8").decode("unicode_escape"))
-                if len(urls) >= limit:
+        if len(candidates) < limit:
+            for match in re.finditer(r"murl&quot;:&quot;(.*?)&quot;", page):
+                add_candidate(candidates, match.group(1), movie_title, context=query, source="bing")
+                if len(candidates) >= limit:
                     break
     except Exception:
         return []
-    return urls
+    return candidates
 
 
-async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
+async def wikimedia_image_candidates(query: str, movie_title: str, limit: int = 5) -> list[dict[str, str]]:
     api = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
@@ -306,41 +374,41 @@ async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
             data = response.json()
     except Exception:
         return []
-    pages = data.get("query", {}).get("pages", {})
-    urls: list[str] = []
-    for page in pages.values():
+    candidates: list[dict[str, str]] = []
+    for page in data.get("query", {}).get("pages", {}).values():
         info = (page.get("imageinfo") or [{}])[0]
         url = info.get("url")
         mime = info.get("mime", "")
         width = int(info.get("width") or 0)
         height = int(info.get("height") or 0)
+        context = str(page.get("title", ""))
         if url and mime.startswith("image/") and width >= 500 and height >= 500:
-            add_unique(urls, url)
-    return urls
+            add_candidate(candidates, url, movie_title, context=context, source="wikimedia")
+    return candidates
 
 
-async def search_image_urls(query: str) -> dict[str, Any]:
-    urls: list[str] = []
+async def search_image_candidates(query: str, movie_title: str) -> dict[str, Any]:
+    candidates: list[dict[str, str]] = []
     sources: dict[str, int] = {"duckduckgo": 0, "bing": 0, "wikimedia": 0}
 
-    ddg_urls = await duckduckgo_image_urls(query, limit=10)
-    for url in ddg_urls:
-        add_unique(urls, url)
-    sources["duckduckgo"] += len(ddg_urls)
+    ddg = await duckduckgo_image_candidates(query, movie_title, limit=10)
+    for item in ddg:
+        add_candidate(candidates, item["url"], movie_title, item.get("context", ""), item.get("source", "duckduckgo"))
+    sources["duckduckgo"] += len(ddg)
 
-    if len(urls) < IMAGE_COUNT:
-        bing_urls = await bing_image_urls(query, limit=10)
-        for url in bing_urls:
-            add_unique(urls, url)
-        sources["bing"] += len(bing_urls)
+    if len(candidates) < IMAGE_COUNT:
+        bing = await bing_image_candidates(query, movie_title, limit=10)
+        for item in bing:
+            add_candidate(candidates, item["url"], movie_title, item.get("context", ""), item.get("source", "bing"))
+        sources["bing"] += len(bing)
 
-    if len(urls) < IMAGE_COUNT:
-        wiki_urls = await wikimedia_image_urls(query, limit=8)
-        for url in wiki_urls:
-            add_unique(urls, url)
-        sources["wikimedia"] += len(wiki_urls)
+    if len(candidates) < IMAGE_COUNT:
+        wiki = await wikimedia_image_candidates(query, movie_title, limit=8)
+        for item in wiki:
+            add_candidate(candidates, item["url"], movie_title, item.get("context", ""), item.get("source", "wikimedia"))
+        sources["wikimedia"] += len(wiki)
 
-    return {"query": query, "urls": urls, "sources": sources}
+    return {"query": query, "candidates": candidates, "sources": sources}
 
 
 async def download_image(url: str, target: Path) -> bool:
@@ -350,7 +418,7 @@ async def download_image(url: str, target: Path) -> bool:
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                 },
             )
             response.raise_for_status()
@@ -368,31 +436,54 @@ async def download_image(url: str, target: Path) -> bool:
         return False
 
 
+def build_search_queries(movie_title: str, queries: list[str]) -> list[str]:
+    base_title = movie_title.strip()
+    result: list[str] = []
+
+    for query in queries:
+        cleaned = query.strip()
+        if cleaned and not is_blocked_image_candidate(cleaned):
+            result.append(cleaned)
+
+    result.extend([
+        f'"{base_title}" official trailer still',
+        f'"{base_title}" official poster',
+        f'"{base_title}" movie still',
+        f'"{base_title}" cast premiere',
+        f'"{base_title}" Lucasfilm Disney',
+    ])
+    if "mandalorian" in base_title.lower() or "grogu" in base_title.lower():
+        result.extend([
+            '"The Mandalorian and Grogu" official trailer',
+            '"The Mandalorian and Grogu" official poster',
+            '"The Mandalorian and Grogu" Lucasfilm',
+            '"The Mandalorian and Grogu" Pedro Pascal',
+        ])
+
+    unique: list[str] = []
+    for query in result:
+        if query not in unique:
+            unique.append(query)
+    return unique[:14]
+
+
 async def create_internet_images(package_id: str, movie_title: str, movie_year: str, queries: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     images_dir = package_dir(package_id) / "images"
     raw_dir = images_dir / "raw"
     images_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    base_title = movie_title.strip()
-    search_queries = [q for q in queries if q]
-    search_queries.extend([
-        f"{base_title} movie still",
-        f"{base_title} official trailer",
-        f"{base_title} poster",
-        f"{base_title} cast",
-        f"{base_title} premiere",
-        f"The Mandalorian Grogu movie still" if "mandalorian" in base_title.lower() else f"{base_title} film scene",
-    ])
+    search_queries = build_search_queries(movie_title, queries)
+    found: list[dict[str, str]] = []
+    debug: dict[str, Any] = {"queries": [], "downloaded": 0, "fallback": 0, "blocked_keywords": sorted(IMAGE_BLOCKLIST)}
 
-    found_urls: list[str] = []
-    debug: dict[str, Any] = {"queries": [], "downloaded": 0, "fallback": 0}
-    for query in search_queries[:12]:
-        result = await search_image_urls(query)
-        debug["queries"].append({"query": query, "found": len(result["urls"]), "sources": result["sources"]})
-        for url in result["urls"]:
-            add_unique(found_urls, url)
-        if len(found_urls) >= IMAGE_COUNT * 3:
+    for query in search_queries:
+        result = await search_image_candidates(query, movie_title)
+        debug["queries"].append({"query": query, "found": len(result["candidates"]), "sources": result["sources"]})
+        for item in result["candidates"]:
+            if not any(x["url"] == item["url"] for x in found):
+                found.append(item)
+        if len(found) >= IMAGE_COUNT * 3:
             break
 
     images: list[dict[str, Any]] = []
@@ -403,16 +494,18 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
         raw_path = raw_dir / filename
         target = images_dir / filename
         source_url = None
+        source_name = None
         ok = False
 
-        while cursor < len(found_urls) and not ok:
-            candidate = found_urls[cursor]
+        while cursor < len(found) and not ok:
+            candidate = found[cursor]
             cursor += 1
-            if candidate in used_urls:
+            if candidate["url"] in used_urls:
                 continue
-            if await download_image(candidate, raw_path):
-                source_url = candidate
-                used_urls.append(candidate)
+            if await download_image(candidate["url"], raw_path):
+                source_url = candidate["url"]
+                source_name = candidate.get("source")
+                used_urls.append(candidate["url"])
                 ok = True
 
         if ok:
@@ -422,6 +515,7 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
             except Exception:
                 create_fallback_image(target, movie_title, movie_year, index)
                 source_url = None
+                source_name = None
                 debug["fallback"] += 1
         else:
             create_fallback_image(target, movie_title, movie_year, index)
@@ -432,6 +526,7 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
                 "id": uuid.uuid4().hex,
                 "kind": "internet_image" if source_url else "fallback_brand_card",
                 "sort_order": index,
+                "source": source_name,
                 "source_url": source_url,
                 "alt_text_uk": f"{movie_title} — зображення {index}",
                 "local_path": str(target),
@@ -439,7 +534,7 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
             }
         )
 
-    debug["total_found_urls"] = len(found_urls)
+    debug["total_relevant_candidates"] = len(found)
     debug["used_urls"] = used_urls
     return images, debug
 
@@ -466,7 +561,7 @@ def fallback_content(movie_title: str, movie_year: str) -> dict[str, Any]:
         "youtube_title": f"{movie_title} ({movie_year}) — cinematic moment #Shorts",
         "youtube_description": f"Короткий кінематографічний момент із фільму {movie_title} ({movie_year}).\n\n#Shorts #Кіно #Факти #TELONYXCinema",
         "youtube_hashtags": ["#Shorts", "#Кіно", "#Факти", "#TELONYXCinema"],
-        "image_queries": [f"{movie_title} official trailer", f"{movie_title} movie still", f"{movie_title} poster", f"{movie_title} cast"],
+        "image_queries": [f"{movie_title} official trailer still", f"{movie_title} official poster", f"{movie_title} cast premiere"],
         "source_links": [],
         "generated_by": "fallback_without_gemini_key",
     }
@@ -489,7 +584,9 @@ async def generate_with_gemini(movie_title: str, movie_year: str) -> dict[str, A
 4. Не використовуй markdown. Для жирних заголовків використовуй HTML <b>...</b>.
 5. Обовʼязкові хештеги: #Історія #Факти #ЦікавоЗнати #TELONYXCinema
 6. Для TikTok і YouTube Shorts створи окремо title, description, hashtags.
-7. Дай 8 пошукових запитів англійською для пошуку реальних інтернет-зображень: official poster, official trailer still, movie still, cast, premiere, behind the scenes, main actor, character.
+7. image_queries має бути JSON-масивом повних англійських фраз, НЕ окремих слів.
+8. Заборонено давати запити про tattoo, sleeve, ink, design, mandala, merchandise або фан-арт.
+9. Запити мають бути тільки про official poster, official trailer still, movie still, cast premiere, Lucasfilm/Disney press.
 
 Поверни тільки валідний JSON з полями:
 telegram_text_uk, tiktok_title, tiktok_description, tiktok_hashtags,
@@ -499,7 +596,7 @@ youtube_title, youtube_description, youtube_hashtags, image_queries, source_link
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.55, "responseMimeType": "application/json"},
+        "generationConfig": {"temperature": 0.45, "responseMimeType": "application/json"},
     }
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -526,7 +623,7 @@ async def generate_package_task(package_id: str) -> None:
     try:
         update_package(package_id, {"status": "generating", "message": "Генерирую короткий Telegram-caption через Gemini"})
         content = await generate_with_gemini(movie_title, movie_year)
-        update_package(package_id, {"message": "Ищу изображения через DuckDuckGo/Bing/Wikimedia и оформляю в TXC-стиле"})
+        update_package(package_id, {"message": "Ищу релевантные изображения фильма и фильтрую мусор"})
         images, image_debug = await create_internet_images(package_id, movie_title, movie_year, content.get("image_queries", []))
         update_package(
             package_id,
@@ -548,7 +645,7 @@ async def generate_package_task(package_id: str) -> None:
                     "generated_by": content.get("generated_by"),
                     "gemini_error": content.get("gemini_error"),
                     "brand_style": BRAND_STYLE,
-                    "image_source": "duckduckgo_bing_wikimedia",
+                    "image_source": "filtered_duckduckgo_bing_wikimedia",
                     "telegram_mode": "single_album_post_caption",
                 },
             },
