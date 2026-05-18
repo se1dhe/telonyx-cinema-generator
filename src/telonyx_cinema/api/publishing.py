@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus, unquote
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 # Publishing pipeline:
 # - текст генерирует Gemini;
 # - изображения берём из интернета, а не из исходного/готового видео;
+# - порядок поиска: DuckDuckGo Images -> Bing Images -> Wikimedia Commons -> fallback;
 # - в Telegram публикуем ОДИН album-пост: картинки + caption на первой картинке.
 
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/data/storage"))
@@ -28,6 +30,7 @@ BRAND_STYLE = os.getenv("BRAND_STYLE", "dark_neon_cinematic").strip()
 
 TELEGRAM_CAPTION_LIMIT = 1024
 SAFE_CAPTION_LIMIT = 930
+IMAGE_COUNT = 5
 
 router = APIRouter(tags=["publishing"])
 
@@ -74,12 +77,6 @@ def update_package(package_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def slugify(value: str) -> str:
-    value = re.sub(r"[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]+", "-", value.strip())
-    value = re.sub(r"-+", "-", value).strip("-")
-    return value or uuid.uuid4().hex[:8]
-
-
 def normalize_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -109,7 +106,7 @@ def normalize_content(content: dict[str, Any]) -> dict[str, Any]:
         "youtube_title": str(content.get("youtube_title") or ""),
         "youtube_description": str(content.get("youtube_description") or ""),
         "youtube_hashtags": normalize_list(content.get("youtube_hashtags")),
-        "image_queries": normalize_list(content.get("image_queries"))[:8],
+        "image_queries": normalize_list(content.get("image_queries"))[:10],
         "source_links": content.get("source_links") if isinstance(content.get("source_links"), list) else [],
     }
 
@@ -137,12 +134,9 @@ def plain_len_html(text: str) -> int:
 
 
 def compact_caption(text: str) -> str:
-    """Telegram album caption <=1024. Делаем безопасно около 930 символов."""
     text = telegram_html(text).strip()
     if plain_len_html(text) <= SAFE_CAPTION_LIMIT and len(text) <= TELEGRAM_CAPTION_LIMIT:
         return text
-
-    # Режем по строкам, сохраняя хештеги, чтобы album был одним постом.
     plain_hashes = "#Історія #Факти #ЦікавоЗнати #TELONYXCinema"
     cleaned = re.sub(r"\n{3,}", "\n\n", text)
     result = ""
@@ -178,25 +172,24 @@ def cover_resize(image: Image.Image, width: int, height: int) -> Image.Image:
 
 
 def style_internet_image(raw_image: Path, target: Path, index: int) -> None:
-    """Фирменная обработка без длинного текста, чтобы ничего не вылезало за пределы."""
     width, height = 1080, 1350
     image = Image.open(raw_image).convert("RGB")
     image = cover_resize(image, width, height)
     image = ImageEnhance.Contrast(image).enhance(1.08)
-    image = ImageEnhance.Color(image).enhance(0.95)
+    image = ImageEnhance.Color(image).enhance(0.97)
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 42))
-    draw.rectangle((0, height - 190, width, height), fill=(0, 0, 0, 115))
-    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 130), width=3)
-    draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 175))
+    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 36))
+    draw.rectangle((0, height - 175, width, height), fill=(0, 0, 0, 95))
+    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 125), width=3)
+    draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 165))
 
     small_font = load_font(24, bold=True)
     number_font = load_font(24, bold=True)
-    draw.text((86, 70), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 210))
-    draw.text((86, height - 92), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 155))
-    draw.text((width - 126, height - 92), f"0{index}", font=number_font, fill=(34, 211, 238, 210))
+    draw.text((86, 70), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 205))
+    draw.text((86, height - 92), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 145))
+    draw.text((width - 126, height - 92), f"0{index}", font=number_font, fill=(34, 211, 238, 205))
 
     glow = overlay.filter(ImageFilter.GaussianBlur(5))
     result = Image.alpha_composite(image.convert("RGBA"), glow)
@@ -213,25 +206,87 @@ def create_fallback_image(target: Path, movie_title: str, movie_year: str, index
     draw.ellipse((420, 480, 1320, 1480), fill=(139, 30, 30, 100))
     draw.rounded_rectangle((44, 44, width - 44, height - 44), radius=38, outline=(34, 211, 238, 120), width=3)
     draw.rectangle((84, 140, 90, height - 160), fill=(34, 211, 238, 190))
-    title_font = load_font(48, bold=True)
+    title_font = load_font(42, bold=True)
     small_font = load_font(24, bold=True)
     draw.text((112, 95), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 210))
-    # Ограничиваем ширину грубо, без вылета за край.
     title = movie_title.upper()
-    max_chars = 28
+    max_chars = 26
     lines = [title[i:i + max_chars] for i in range(0, min(len(title), max_chars * 3), max_chars)]
     y = 590
     for line in lines[:3]:
         draw.text((112, y), line, font=title_font, fill=(246, 242, 234, 245))
-        y += 58
+        y += 54
     draw.text((112, y + 8), str(movie_year), font=small_font, fill=(34, 211, 238, 245))
     draw.text((112, height - 110), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 140))
     draw.text((width - 140, height - 110), f"0{index}", font=small_font, fill=(34, 211, 238, 190))
     Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(target, quality=93)
 
 
+def add_unique(urls: list[str], url: str | None) -> None:
+    if not url:
+        return
+    url = html.unescape(unquote(url)).strip()
+    if not url.startswith(("http://", "https://")):
+        return
+    lowered = url.lower()
+    if any(bad in lowered for bad in [".svg", "favicon", "logo", "sprite", "data:image"]):
+        return
+    if url not in urls:
+        urls.append(url)
+
+
+async def duckduckgo_image_urls(query: str, limit: int = 8) -> list[str]:
+    urls: list[str] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=headers) as client:
+            html_page = (await client.get("https://duckduckgo.com/", params={"q": query, "iax": "images", "ia": "images"})).text
+            match = re.search(r"vqd=['\"]?([^'\"&]+)", html_page)
+            if not match:
+                return []
+            vqd = match.group(1)
+            response = await client.get(
+                "https://duckduckgo.com/i.js",
+                params={"l": "us-en", "o": "json", "q": query, "vqd": vqd, "f": ",,,", "p": "1"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        for item in data.get("results", []):
+            add_unique(urls, item.get("image"))
+            if len(urls) >= limit:
+                break
+    except Exception:
+        return []
+    return urls
+
+
+async def bing_image_urls(query: str, limit: int = 8) -> list[str]:
+    urls: list[str] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=headers) as client:
+            page = (await client.get("https://www.bing.com/images/search", params={"q": query, "form": "HDRSC2", "first": "1"})).text
+        for match in re.finditer(r"murl&quot;:&quot;(.*?)&quot;", page):
+            add_unique(urls, match.group(1))
+            if len(urls) >= limit:
+                break
+        if len(urls) < limit:
+            for match in re.finditer(r'"murl":"(.*?)"', page):
+                add_unique(urls, match.group(1).encode("utf-8").decode("unicode_escape"))
+                if len(urls) >= limit:
+                    break
+    except Exception:
+        return []
+    return urls
+
+
 async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
-    """Ищет изображения в интернете через Wikimedia Commons API без ключей."""
     api = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query",
@@ -251,7 +306,6 @@ async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
             data = response.json()
     except Exception:
         return []
-
     pages = data.get("query", {}).get("pages", {})
     urls: list[str] = []
     for page in pages.values():
@@ -261,69 +315,117 @@ async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
         width = int(info.get("width") or 0)
         height = int(info.get("height") or 0)
         if url and mime.startswith("image/") and width >= 500 and height >= 500:
-            urls.append(url)
+            add_unique(urls, url)
     return urls
+
+
+async def search_image_urls(query: str) -> dict[str, Any]:
+    urls: list[str] = []
+    sources: dict[str, int] = {"duckduckgo": 0, "bing": 0, "wikimedia": 0}
+
+    ddg_urls = await duckduckgo_image_urls(query, limit=10)
+    for url in ddg_urls:
+        add_unique(urls, url)
+    sources["duckduckgo"] += len(ddg_urls)
+
+    if len(urls) < IMAGE_COUNT:
+        bing_urls = await bing_image_urls(query, limit=10)
+        for url in bing_urls:
+            add_unique(urls, url)
+        sources["bing"] += len(bing_urls)
+
+    if len(urls) < IMAGE_COUNT:
+        wiki_urls = await wikimedia_image_urls(query, limit=8)
+        for url in wiki_urls:
+            add_unique(urls, url)
+        sources["wikimedia"] += len(wiki_urls)
+
+    return {"query": query, "urls": urls, "sources": sources}
 
 
 async def download_image(url: str, target: Path) -> bool:
     try:
         async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
-            response = await client.get(url, headers={"User-Agent": "TELONYX-Cinema/1.0"})
+            response = await client.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                },
+            )
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")
-            if not content_type.startswith("image/"):
+            if not content_type.startswith("image/") or len(response.content) < 10_000:
                 return False
             target.write_bytes(response.content)
-        Image.open(target).verify()
+        with Image.open(target) as img:
+            width, height = img.size
+            if width < 420 or height < 420:
+                return False
+            img.verify()
         return True
     except Exception:
         return False
 
 
-async def create_internet_images(package_id: str, movie_title: str, movie_year: str, queries: list[str]) -> list[dict[str, Any]]:
+async def create_internet_images(package_id: str, movie_title: str, movie_year: str, queries: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     images_dir = package_dir(package_id) / "images"
     raw_dir = images_dir / "raw"
     images_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    search_queries = queries or [
-        f"{movie_title} film poster",
-        f"{movie_title} cast",
-        f"{movie_title} movie premiere",
-        f"{movie_title} actor",
-        f"{movie_title} Lucasfilm",
-    ]
-    # Добавляем общие варианты, потому что Wikimedia лучше находит по персонажам/актёрам/премьерам.
-    search_queries.extend([f"{movie_title} movie", f"{movie_title} film", f"{movie_title} cast"])
+    base_title = movie_title.strip()
+    search_queries = [q for q in queries if q]
+    search_queries.extend([
+        f"{base_title} movie still",
+        f"{base_title} official trailer",
+        f"{base_title} poster",
+        f"{base_title} cast",
+        f"{base_title} premiere",
+        f"The Mandalorian Grogu movie still" if "mandalorian" in base_title.lower() else f"{base_title} film scene",
+    ])
 
     found_urls: list[str] = []
-    for query in search_queries[:8]:
-        for url in await wikimedia_image_urls(query, limit=5):
-            if url not in found_urls:
-                found_urls.append(url)
-            if len(found_urls) >= 5:
-                break
-        if len(found_urls) >= 5:
+    debug: dict[str, Any] = {"queries": [], "downloaded": 0, "fallback": 0}
+    for query in search_queries[:12]:
+        result = await search_image_urls(query)
+        debug["queries"].append({"query": query, "found": len(result["urls"]), "sources": result["sources"]})
+        for url in result["urls"]:
+            add_unique(found_urls, url)
+        if len(found_urls) >= IMAGE_COUNT * 3:
             break
 
     images: list[dict[str, Any]] = []
-    for index in range(1, 6):
+    used_urls: list[str] = []
+    cursor = 0
+    for index in range(1, IMAGE_COUNT + 1):
         filename = f"{index:02d}-internet.jpg"
         raw_path = raw_dir / filename
         target = images_dir / filename
-        source_url = found_urls[index - 1] if index - 1 < len(found_urls) else None
-
+        source_url = None
         ok = False
-        if source_url:
-            ok = await download_image(source_url, raw_path)
+
+        while cursor < len(found_urls) and not ok:
+            candidate = found_urls[cursor]
+            cursor += 1
+            if candidate in used_urls:
+                continue
+            if await download_image(candidate, raw_path):
+                source_url = candidate
+                used_urls.append(candidate)
+                ok = True
+
         if ok:
             try:
                 style_internet_image(raw_path, target, index)
+                debug["downloaded"] += 1
             except Exception:
                 create_fallback_image(target, movie_title, movie_year, index)
                 source_url = None
+                debug["fallback"] += 1
         else:
             create_fallback_image(target, movie_title, movie_year, index)
+            debug["fallback"] += 1
 
         images.append(
             {
@@ -336,7 +438,10 @@ async def create_internet_images(package_id: str, movie_title: str, movie_year: 
                 "url": f"/api/publish-packages/{package_id}/images/{filename}",
             }
         )
-    return images
+
+    debug["total_found_urls"] = len(found_urls)
+    debug["used_urls"] = used_urls
+    return images, debug
 
 
 def fallback_content(movie_title: str, movie_year: str) -> dict[str, Any]:
@@ -361,7 +466,7 @@ def fallback_content(movie_title: str, movie_year: str) -> dict[str, Any]:
         "youtube_title": f"{movie_title} ({movie_year}) — cinematic moment #Shorts",
         "youtube_description": f"Короткий кінематографічний момент із фільму {movie_title} ({movie_year}).\n\n#Shorts #Кіно #Факти #TELONYXCinema",
         "youtube_hashtags": ["#Shorts", "#Кіно", "#Факти", "#TELONYXCinema"],
-        "image_queries": [f"{movie_title} film poster", f"{movie_title} cast", f"{movie_title} movie premiere"],
+        "image_queries": [f"{movie_title} official trailer", f"{movie_title} movie still", f"{movie_title} poster", f"{movie_title} cast"],
         "source_links": [],
         "generated_by": "fallback_without_gemini_key",
     }
@@ -384,7 +489,7 @@ async def generate_with_gemini(movie_title: str, movie_year: str) -> dict[str, A
 4. Не використовуй markdown. Для жирних заголовків використовуй HTML <b>...</b>.
 5. Обовʼязкові хештеги: #Історія #Факти #ЦікавоЗнати #TELONYXCinema
 6. Для TikTok і YouTube Shorts створи окремо title, description, hashtags.
-7. Дай 5 пошукових запитів англійською для пошуку зображень в інтернеті: постер, актори, премʼєра, behind the scenes, moments.
+7. Дай 8 пошукових запитів англійською для пошуку реальних інтернет-зображень: official poster, official trailer still, movie still, cast, premiere, behind the scenes, main actor, character.
 
 Поверни тільки валідний JSON з полями:
 telegram_text_uk, tiktok_title, tiktok_description, tiktok_hashtags,
@@ -421,8 +526,8 @@ async def generate_package_task(package_id: str) -> None:
     try:
         update_package(package_id, {"status": "generating", "message": "Генерирую короткий Telegram-caption через Gemini"})
         content = await generate_with_gemini(movie_title, movie_year)
-        update_package(package_id, {"message": "Ищу изображения в интернете и оформляю в TXC-стиле"})
-        images = await create_internet_images(package_id, movie_title, movie_year, content.get("image_queries", []))
+        update_package(package_id, {"message": "Ищу изображения через DuckDuckGo/Bing/Wikimedia и оформляю в TXC-стиле"})
+        images, image_debug = await create_internet_images(package_id, movie_title, movie_year, content.get("image_queries", []))
         update_package(
             package_id,
             {
@@ -438,11 +543,12 @@ async def generate_package_task(package_id: str) -> None:
                 "source_links": content.get("source_links", []),
                 "image_queries": content.get("image_queries", []),
                 "images": images,
+                "image_debug": image_debug,
                 "generator_meta": {
                     "generated_by": content.get("generated_by"),
                     "gemini_error": content.get("gemini_error"),
                     "brand_style": BRAND_STYLE,
-                    "image_source": "internet_wikimedia_commons",
+                    "image_source": "duckduckgo_bing_wikimedia",
                     "telegram_mode": "single_album_post_caption",
                 },
             },
@@ -464,7 +570,7 @@ async def publish_to_telegram(package: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=120) as client:
         media: list[dict[str, Any]] = []
         files: dict[str, tuple[str, bytes, str]] = {}
-        for idx, item in enumerate(images[:5]):
+        for idx, item in enumerate(images[:IMAGE_COUNT]):
             path = Path(item.get("local_path", ""))
             if not path.exists():
                 continue
