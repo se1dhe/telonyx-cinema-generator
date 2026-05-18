@@ -2,7 +2,6 @@ import html
 import json
 import os
 import re
-import subprocess
 import textwrap
 import uuid
 from datetime import datetime
@@ -12,10 +11,12 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-# Publishing-модуль работает поверх уже готовых job из STORAGE_DIR/jobs/{job_id}.
-# Для Telegram preview теперь используем реальные кадры из готового MP4, а не текстовые заглушки.
+# Publishing pipeline:
+# - текст генерирует Gemini;
+# - изображения берём из интернета, а не из исходного/готового видео;
+# - в Telegram публикуем ОДИН album-пост: картинки + caption на первой картинке.
 
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/data/storage"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -24,42 +25,37 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@TXC_UA").strip()
 BRAND_WATERMARK = os.getenv("BRAND_WATERMARK", "TELONYX CINEMA").strip()
 BRAND_STYLE = os.getenv("BRAND_STYLE", "dark_neon_cinematic").strip()
-FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
-FFPROBE = os.getenv("FFPROBE_BIN", "ffprobe")
+
+TELEGRAM_CAPTION_LIMIT = 1024
+SAFE_CAPTION_LIMIT = 930
 
 router = APIRouter(tags=["publishing"])
 
 
 def now_iso() -> str:
-    """Возвращает UTC-время в ISO-формате для state-файлов."""
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def job_dir(job_id: str) -> Path:
-    """Папка существующей задачи рендера."""
     return STORAGE_DIR / "jobs" / job_id
 
 
 def package_dir(package_id: str) -> Path:
-    """Папка контент-пакета публикации."""
     return STORAGE_DIR / "publish_packages" / package_id
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    """Безопасно читит JSON-файл."""
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Файл не найден: {path.name}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Записывает JSON с нормальным UTF-8."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_job_state(job_id: str) -> dict[str, Any]:
-    """Читает state существующего finalizer job."""
     state_path = job_dir(job_id) / "state.json"
     if not state_path.exists():
         raise HTTPException(status_code=404, detail="Задача рендера не найдена")
@@ -70,7 +66,6 @@ def read_job_state(job_id: str) -> dict[str, Any]:
 
 
 def update_package(package_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-    """Обновляет state content package."""
     path = package_dir(package_id) / "package.json"
     data = read_json(path) if path.exists() else {"package_id": package_id}
     data.update(patch)
@@ -80,39 +75,31 @@ def update_package(package_id: str, patch: dict[str, Any]) -> dict[str, Any]:
 
 
 def slugify(value: str) -> str:
-    """Делает безопасный slug для имён файлов."""
     value = re.sub(r"[^a-zA-Z0-9а-яА-ЯіїєґІЇЄҐ_-]+", "-", value.strip())
     value = re.sub(r"-+", "-", value).strip("-")
     return value or uuid.uuid4().hex[:8]
 
 
 def normalize_list(value: Any) -> list[str]:
-    """Приводит Gemini-ответ к списку строк.
-
-    Gemini иногда возвращает hashtags строкой, объектом или массивом объектов.
-    Frontend и Telegram-публикация должны получать стабильный формат.
-    """
     if value is None:
         return []
     if isinstance(value, list):
         result: list[str] = []
         for item in value:
             result.extend(normalize_list(item))
-        return [item for item in result if item]
+        return [x for x in result if x]
     if isinstance(value, dict):
         result: list[str] = []
         for item in value.values():
             result.extend(normalize_list(item))
-        return [item for item in result if item]
+        return [x for x in result if x]
     if isinstance(value, str):
-        # Для хештегов строка обычно приходит как "#one #two" или "#one, #two".
-        parts = re.split(r"[\s,]+", value.strip())
-        return [part.strip() for part in parts if part.strip()]
-    return [str(value).strip()] if str(value).strip() else []
+        return [x.strip() for x in re.split(r"[\s,]+", value.strip()) if x.strip()]
+    value = str(value).strip()
+    return [value] if value else []
 
 
 def normalize_content(content: dict[str, Any]) -> dict[str, Any]:
-    """Нормализует структуру Gemini/fallback перед сохранением."""
     return {
         **content,
         "telegram_text_uk": str(content.get("telegram_text_uk") or ""),
@@ -122,22 +109,14 @@ def normalize_content(content: dict[str, Any]) -> dict[str, Any]:
         "youtube_title": str(content.get("youtube_title") or ""),
         "youtube_description": str(content.get("youtube_description") or ""),
         "youtube_hashtags": normalize_list(content.get("youtube_hashtags")),
-        "image_prompts_uk": normalize_list(content.get("image_prompts_uk"))[:5],
+        "image_queries": normalize_list(content.get("image_queries"))[:8],
         "source_links": content.get("source_links") if isinstance(content.get("source_links"), list) else [],
     }
 
 
 def telegram_html(text: str) -> str:
-    """Конвертирует простой Gemini markdown в безопасный Telegram HTML.
-
-    Было: **Історія створення** показывалось как текст, потому что отправка идёт
-    через parse_mode=HTML. Теперь **...** превращается в <b>...</b>, а остальное
-    экранируется.
-    """
     if not text:
         return ""
-
-    # Временно заменяем markdown-bold на плейсхолдеры, потом экранируем всё остальное.
     bold_parts: list[str] = []
 
     def remember_bold(match: re.Match[str]) -> str:
@@ -145,20 +124,40 @@ def telegram_html(text: str) -> str:
         return f"@@BOLD_{len(bold_parts) - 1}@@"
 
     converted = re.sub(r"\*\*(.+?)\*\*", remember_bold, text, flags=re.DOTALL)
-
-    # Если fallback или модель уже вернули <b>, не даём любому HTML пройти как есть.
     converted = converted.replace("<b>", "@@OPEN_B@@").replace("</b>", "@@CLOSE_B@@")
     converted = html.escape(converted)
     converted = converted.replace("@@OPEN_B@@", "<b>").replace("@@CLOSE_B@@", "</b>")
-
     for index, part in enumerate(bold_parts):
         converted = converted.replace(f"@@BOLD_{index}@@", f"<b>{part}</b>")
-
     return converted
 
 
+def plain_len_html(text: str) -> int:
+    return len(re.sub(r"<[^>]+>", "", text))
+
+
+def compact_caption(text: str) -> str:
+    """Telegram album caption <=1024. Делаем безопасно около 930 символов."""
+    text = telegram_html(text).strip()
+    if plain_len_html(text) <= SAFE_CAPTION_LIMIT and len(text) <= TELEGRAM_CAPTION_LIMIT:
+        return text
+
+    # Режем по строкам, сохраняя хештеги, чтобы album был одним постом.
+    plain_hashes = "#Історія #Факти #ЦікавоЗнати #TELONYXCinema"
+    cleaned = re.sub(r"\n{3,}", "\n\n", text)
+    result = ""
+    for line in cleaned.splitlines():
+        candidate = (result + "\n" + line).strip()
+        if plain_len_html(candidate) > SAFE_CAPTION_LIMIT - len(plain_hashes) - 10:
+            break
+        result = candidate
+    result = result.strip()
+    if plain_hashes not in result:
+        result = f"{result}\n\n{plain_hashes}".strip()
+    return result[:TELEGRAM_CAPTION_LIMIT]
+
+
 def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Загружает системный шрифт."""
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
@@ -169,42 +168,7 @@ def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFo
     return ImageFont.load_default()
 
 
-def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
-    """Разбивает текст на строки по реальной ширине."""
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        test = f"{current} {word}".strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= max_width or not current:
-            current = test
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
-
-
-def probe_duration(path: Path) -> float:
-    """Получает длительность видео для выбора кадров."""
-    result = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if result.returncode != 0:
-        return 0.0
-    try:
-        return max(0.1, float(result.stdout.strip()))
-    except ValueError:
-        return 0.0
-
-
 def cover_resize(image: Image.Image, width: int, height: int) -> Image.Image:
-    """Масштабирует изображение cover-crop под нужный размер."""
     source_width, source_height = image.size
     scale = max(width / source_width, height / source_height)
     resized = image.resize((int(source_width * scale), int(source_height * scale)), Image.Resampling.LANCZOS)
@@ -213,166 +177,180 @@ def cover_resize(image: Image.Image, width: int, height: int) -> Image.Image:
     return resized.crop((left, top, left + width, top + height))
 
 
-def style_video_frame(raw_frame: Path, target: Path, movie_title: str, movie_year: str, index: int) -> None:
-    """Превращает реальный кадр из ролика в фирменную Telegram-картинку."""
+def style_internet_image(raw_image: Path, target: Path, index: int) -> None:
+    """Фирменная обработка без длинного текста, чтобы ничего не вылезало за пределы."""
     width, height = 1080, 1350
-    image = Image.open(raw_frame).convert("RGB")
+    image = Image.open(raw_image).convert("RGB")
     image = cover_resize(image, width, height)
+    image = ImageEnhance.Contrast(image).enhance(1.08)
+    image = ImageEnhance.Color(image).enhance(0.95)
 
-    # Лёгкая премиальная обработка: контраст через overlay, виньетка, neon frame.
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 62))
-    draw.rectangle((0, int(height * 0.66), width, height), fill=(0, 0, 0, 92))
-    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 150), width=3)
-    draw.rectangle((62, 128, 68, height - 190), fill=(34, 211, 238, 185))
+    draw.rectangle((0, 0, width, height), fill=(2, 4, 10, 42))
+    draw.rectangle((0, height - 190, width, height), fill=(0, 0, 0, 115))
+    draw.rounded_rectangle((34, 34, width - 34, height - 34), radius=34, outline=(34, 211, 238, 130), width=3)
+    draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 175))
 
     small_font = load_font(24, bold=True)
-    title_font = load_font(38, bold=True)
-    year_font = load_font(24, bold=True)
-    watermark_font = load_font(22, bold=True)
+    number_font = load_font(24, bold=True)
+    draw.text((86, 70), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 210))
+    draw.text((86, height - 92), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 155))
+    draw.text((width - 126, height - 92), f"0{index}", font=number_font, fill=(34, 211, 238, 210))
 
-    # Название делаем маленьким и переносим, чтобы оно больше не вылезало за кадр.
-    title_lines = wrap_text(draw, movie_title.upper(), title_font, width - 170)[:2]
-    y = 74
-    draw.text((84, y), "TXC UKRAINE", font=small_font, fill=(210, 220, 230, 210))
-    y += 46
-    for line in title_lines:
-        draw.text((84, y), line, font=title_font, fill=(246, 242, 234, 245))
-        y += 46
-    draw.text((84, y + 6), str(movie_year), font=year_font, fill=(34, 211, 238, 245))
-
-    draw.text((84, height - 96), BRAND_WATERMARK, font=watermark_font, fill=(255, 255, 255, 145))
-    draw.text((width - 128, height - 96), f"0{index}", font=watermark_font, fill=(34, 211, 238, 190))
-
-    glow = overlay.filter(ImageFilter.GaussianBlur(8))
-    image_rgba = Image.alpha_composite(image.convert("RGBA"), glow)
-    image_rgba = Image.alpha_composite(image_rgba, overlay)
-    image_rgba.convert("RGB").save(target, quality=94)
+    glow = overlay.filter(ImageFilter.GaussianBlur(5))
+    result = Image.alpha_composite(image.convert("RGBA"), glow)
+    result = Image.alpha_composite(result, overlay)
+    result.convert("RGB").save(target, quality=93)
 
 
-def create_brand_image(target: Path, movie_title: str, movie_year: str, label: str, index: int) -> None:
-    """Fallback-картинка, если ffmpeg не смог вытащить кадры из видео."""
+def create_fallback_image(target: Path, movie_title: str, movie_year: str, index: int) -> None:
     width, height = 1080, 1350
-    image = Image.new("RGB", (width, height), "#05060b")
+    image = Image.new("RGB", (width, height), "#060812")
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle((0, 0, width, height), fill=(8, 13, 28, 255))
-    draw.ellipse((-220, -180, 620, 620), fill=(34, 211, 238, 42))
-    draw.ellipse((420, 470, 1320, 1480), fill=(139, 30, 30, 92))
-    draw.rounded_rectangle((44, 44, width - 44, height - 44), radius=38, outline=(34, 211, 238, 115), width=3)
-    draw.rectangle((84, 164, 90, height - 220), fill=(34, 211, 238, 190))
-
+    draw.ellipse((-220, -180, 620, 620), fill=(34, 211, 238, 44))
+    draw.ellipse((420, 480, 1320, 1480), fill=(139, 30, 30, 100))
+    draw.rounded_rectangle((44, 44, width - 44, height - 44), radius=38, outline=(34, 211, 238, 120), width=3)
+    draw.rectangle((84, 140, 90, height - 160), fill=(34, 211, 238, 190))
+    title_font = load_font(48, bold=True)
     small_font = load_font(24, bold=True)
-    title_font = load_font(42, bold=True)
-    label_font = load_font(44, bold=True)
-    watermark_font = load_font(22, bold=True)
-
-    draw.text((110, 96), "TXC UKRAINE", font=small_font, fill=(210, 220, 230, 210))
-    y = 150
-    for line in wrap_text(draw, movie_title.upper(), title_font, 850)[:2]:
-        draw.text((110, y), line, font=title_font, fill=(246, 242, 234, 245))
-        y += 50
-    draw.text((110, y + 8), str(movie_year), font=small_font, fill=(34, 211, 238, 245))
-
-    y = 680
-    for line in wrap_text(draw, label, label_font, 850)[:4]:
-        draw.text((110, y), line, font=label_font, fill=(255, 255, 255, 235))
+    draw.text((112, 95), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 210))
+    # Ограничиваем ширину грубо, без вылета за край.
+    title = movie_title.upper()
+    max_chars = 28
+    lines = [title[i:i + max_chars] for i in range(0, min(len(title), max_chars * 3), max_chars)]
+    y = 590
+    for line in lines[:3]:
+        draw.text((112, y), line, font=title_font, fill=(246, 242, 234, 245))
         y += 58
-
-    draw.text((110, height - 110), BRAND_WATERMARK, font=watermark_font, fill=(255, 255, 255, 140))
-    draw.text((width - 140, height - 110), f"0{index}", font=watermark_font, fill=(34, 211, 238, 190))
-
-    image = Image.alpha_composite(image.convert("RGBA"), overlay)
-    image.convert("RGB").save(target, quality=94)
+    draw.text((112, y + 8), str(movie_year), font=small_font, fill=(34, 211, 238, 245))
+    draw.text((112, height - 110), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 140))
+    draw.text((width - 140, height - 110), f"0{index}", font=small_font, fill=(34, 211, 238, 190))
+    Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB").save(target, quality=93)
 
 
-def create_video_frame_images(package_id: str, job_state: dict[str, Any], movie_title: str, movie_year: str, labels: list[str]) -> list[dict[str, Any]]:
-    """Берёт 3–5 кадров из готового MP4 и оформляет их в фирменном стиле."""
+async def wikimedia_image_urls(query: str, limit: int = 5) -> list[str]:
+    """Ищет изображения в интернете через Wikimedia Commons API без ключей."""
+    api = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "generator": "search",
+        "gsrsearch": query,
+        "gsrnamespace": "6",
+        "gsrlimit": str(limit),
+        "prop": "imageinfo",
+        "iiprop": "url|mime|size",
+        "format": "json",
+        "origin": "*",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+            response = await client.get(api, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except Exception:
+        return []
+
+    pages = data.get("query", {}).get("pages", {})
+    urls: list[str] = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        url = info.get("url")
+        mime = info.get("mime", "")
+        width = int(info.get("width") or 0)
+        height = int(info.get("height") or 0)
+        if url and mime.startswith("image/") and width >= 500 and height >= 500:
+            urls.append(url)
+    return urls
+
+
+async def download_image(url: str, target: Path) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+            response = await client.get(url, headers={"User-Agent": "TELONYX-Cinema/1.0"})
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if not content_type.startswith("image/"):
+                return False
+            target.write_bytes(response.content)
+        Image.open(target).verify()
+        return True
+    except Exception:
+        return False
+
+
+async def create_internet_images(package_id: str, movie_title: str, movie_year: str, queries: list[str]) -> list[dict[str, Any]]:
     images_dir = package_dir(package_id) / "images"
     raw_dir = images_dir / "raw"
     images_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    video_path = Path(str(job_state.get("output_path") or job_dir(job_state["job_id"]) / "final_vertical.mp4"))
-    if not video_path.exists():
-        video_path = job_dir(job_state["job_id"]) / "final_vertical.mp4"
+    search_queries = queries or [
+        f"{movie_title} film poster",
+        f"{movie_title} cast",
+        f"{movie_title} movie premiere",
+        f"{movie_title} actor",
+        f"{movie_title} Lucasfilm",
+    ]
+    # Добавляем общие варианты, потому что Wikimedia лучше находит по персонажам/актёрам/премьерам.
+    search_queries.extend([f"{movie_title} movie", f"{movie_title} film", f"{movie_title} cast"])
 
-    duration = probe_duration(video_path) if video_path.exists() else 0.0
-    if duration <= 0:
-        duration = 10.0
+    found_urls: list[str] = []
+    for query in search_queries[:8]:
+        for url in await wikimedia_image_urls(query, limit=5):
+            if url not in found_urls:
+                found_urls.append(url)
+            if len(found_urls) >= 5:
+                break
+        if len(found_urls) >= 5:
+            break
 
-    frame_count = 5
-    ratios = [0.12, 0.29, 0.47, 0.65, 0.83]
     images: list[dict[str, Any]] = []
-
-    for index, ratio in enumerate(ratios[:frame_count], start=1):
-        filename = f"{index:02d}-video-frame.jpg"
-        raw_frame = raw_dir / filename
+    for index in range(1, 6):
+        filename = f"{index:02d}-internet.jpg"
+        raw_path = raw_dir / filename
         target = images_dir / filename
-        timestamp = max(0.1, min(duration - 0.2, duration * ratio))
-        label = labels[index - 1] if index - 1 < len(labels) else f"Кадр {index}"
+        source_url = found_urls[index - 1] if index - 1 < len(found_urls) else None
 
-        try:
-            result = subprocess.run(
-                [
-                    FFMPEG,
-                    "-y",
-                    "-ss",
-                    f"{timestamp:.3f}",
-                    "-i",
-                    str(video_path),
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "2",
-                    str(raw_frame),
-                ],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            if result.returncode != 0 or not raw_frame.exists():
-                raise RuntimeError(result.stdout[-800:])
-            style_video_frame(raw_frame, target, movie_title, movie_year, index)
-        except Exception:
-            create_brand_image(target, movie_title, movie_year, label, index)
+        ok = False
+        if source_url:
+            ok = await download_image(source_url, raw_path)
+        if ok:
+            try:
+                style_internet_image(raw_path, target, index)
+            except Exception:
+                create_fallback_image(target, movie_title, movie_year, index)
+                source_url = None
+        else:
+            create_fallback_image(target, movie_title, movie_year, index)
 
         images.append(
             {
                 "id": uuid.uuid4().hex,
-                "kind": "video_frame",
+                "kind": "internet_image" if source_url else "fallback_brand_card",
                 "sort_order": index,
-                "alt_text_uk": label,
+                "source_url": source_url,
+                "alt_text_uk": f"{movie_title} — зображення {index}",
                 "local_path": str(target),
                 "url": f"/api/publish-packages/{package_id}/images/{filename}",
             }
         )
-
     return images
 
 
 def fallback_content(movie_title: str, movie_year: str) -> dict[str, Any]:
-    """Fallback, если Gemini API ещё не подключён или вернул ошибку."""
     telegram_text = textwrap.dedent(
         f"""
         🎬 <b>{html.escape(movie_title)} ({html.escape(str(movie_year))})</b>
 
-        Іноді фільм стає більшим, ніж просто історія на екрані. Він перетворюється на настрій, спогад і окремий візуальний код.
+        Кіно знову нагадує: іноді один момент важить більше, ніж ціла історія.
 
-        <b>Історія створення</b>
-        Для цього релізу TELONYX Cinema підготує окремий матеріал з історією виробництва, атмосферою зйомок і деталями, які зазвичай залишаються поза кадром.
+        <b>Історія</b>: цей матеріал підготовлений як короткий кінопост для TELONYX Cinema — з атмосферою, фактами й візуальним настроєм фільму.
 
-        <b>Цікаві факти</b>
-        1. Візуальний стиль фільму — один із головних елементів його впізнаваності.
-        2. Музика, монтаж і колір створюють окремий емоційний ритм.
-        3. Персонажі часто розкриваються не тільки словами, а й паузами, поглядами та деталями кадру.
-        4. Саме короткі сцени часто найкраще передають головний нерв фільму.
-        5. У форматі Shorts такі моменти працюють як кінематографічний спалах памʼяті.
+        <b>Факти</b>: візуальний стиль, музика, монтаж і паузи персонажів часто створюють головну емоцію сцени.
 
-        Кіно живе не тільки в повному метрі. Іноді достатньо одного моменту.
-
-        #Історія #Факти #ЦікавоЗнати #Кіно #TELONYXCinema
+        #Історія #Факти #ЦікавоЗнати #TELONYXCinema
         """
     ).strip()
     return {
@@ -383,14 +361,13 @@ def fallback_content(movie_title: str, movie_year: str) -> dict[str, Any]:
         "youtube_title": f"{movie_title} ({movie_year}) — cinematic moment #Shorts",
         "youtube_description": f"Короткий кінематографічний момент із фільму {movie_title} ({movie_year}).\n\n#Shorts #Кіно #Факти #TELONYXCinema",
         "youtube_hashtags": ["#Shorts", "#Кіно", "#Факти", "#TELONYXCinema"],
-        "image_prompts_uk": ["Кадр із ролика", "Атмосфера сцени", "Головний момент", "Кінематографічний кадр", "TELONYX Cinema edit"],
+        "image_queries": [f"{movie_title} film poster", f"{movie_title} cast", f"{movie_title} movie premiere"],
         "source_links": [],
         "generated_by": "fallback_without_gemini_key",
     }
 
 
 async def generate_with_gemini(movie_title: str, movie_year: str) -> dict[str, Any]:
-    """Генерирует структурированный JSON через Gemini REST API."""
     if not GEMINI_API_KEY:
         return normalize_content(fallback_content(movie_title, movie_year))
 
@@ -401,27 +378,24 @@ async def generate_with_gemini(movie_title: str, movie_year: str) -> dict[str, A
 Рік: {movie_year}
 
 Завдання:
-1. Знайди історію створення фільму та цікаві факти.
-2. Пиши тільки українською мовою.
-3. Не вигадуй факти. Якщо факт не підтверджено джерелами — не використовуй.
-4. Тон: кінематографічний, темний, атмосферний, але зрозумілий.
-5. Telegram-пост: хук, блок «Історія створення», 5 фактів, фінальна фраза, хештеги.
-6. Не використовуй markdown. Для жирних заголовків використовуй HTML <b>...</b>.
-7. Обовʼязкові хештеги Telegram: #Історія #Факти #ЦікавоЗнати
-8. Для TikTok і YouTube Shorts створи окремо title, description, hashtags.
-9. Дай 5 коротких українських alt-підписів до кадрів із відео.
+1. Напиши короткий Telegram-caption українською мовою до 900 символів.
+2. Це має бути ОДИН пост з фотоальбомом, тому текст має бути коротким.
+3. Структура: хук, 1 короткий блок історії створення, 3 короткі факти, фінальна фраза.
+4. Не використовуй markdown. Для жирних заголовків використовуй HTML <b>...</b>.
+5. Обовʼязкові хештеги: #Історія #Факти #ЦікавоЗнати #TELONYXCinema
+6. Для TikTok і YouTube Shorts створи окремо title, description, hashtags.
+7. Дай 5 пошукових запитів англійською для пошуку зображень в інтернеті: постер, актори, премʼєра, behind the scenes, moments.
 
 Поверни тільки валідний JSON з полями:
 telegram_text_uk, tiktok_title, tiktok_description, tiktok_hashtags,
-youtube_title, youtube_description, youtube_hashtags, image_prompts_uk, source_links.
+youtube_title, youtube_description, youtube_hashtags, image_queries, source_links.
 """.strip()
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.65, "responseMimeType": "application/json"},
+        "generationConfig": {"temperature": 0.55, "responseMimeType": "application/json"},
     }
-
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=payload)
@@ -430,29 +404,25 @@ youtube_title, youtube_description, youtube_hashtags, image_prompts_uk, source_l
         text = raw["candidates"][0]["content"]["parts"][0]["text"]
         data = json.loads(text)
         data["generated_by"] = GEMINI_MODEL
-        return normalize_content(data)
+        normalized = normalize_content(data)
+        normalized["telegram_text_uk"] = compact_caption(normalized["telegram_text_uk"])
+        return normalized
     except Exception as exc:
         data = normalize_content(fallback_content(movie_title, movie_year))
+        data["telegram_text_uk"] = compact_caption(data["telegram_text_uk"])
         data["gemini_error"] = str(exc)
         return data
 
 
 async def generate_package_task(package_id: str) -> None:
-    """Фоновая генерация текста и Telegram-картинок из кадров видео."""
-    package_path = package_dir(package_id) / "package.json"
-    package = read_json(package_path)
-    job_id = package["job_id"]
+    package = read_json(package_dir(package_id) / "package.json")
     movie_title = package["movie_title"]
     movie_year = package["movie_year"]
-
     try:
-        update_package(package_id, {"status": "generating", "message": "Генерирую украинский контент через Gemini"})
+        update_package(package_id, {"status": "generating", "message": "Генерирую короткий Telegram-caption через Gemini"})
         content = await generate_with_gemini(movie_title, movie_year)
-        job_state = read_job_state(job_id)
-
-        update_package(package_id, {"message": "Вытаскиваю 3–5 кадров из готового видео и оформляю в TXC-стиле"})
-        images = create_video_frame_images(package_id, job_state, movie_title, movie_year, content.get("image_prompts_uk", []))
-
+        update_package(package_id, {"message": "Ищу изображения в интернете и оформляю в TXC-стиле"})
+        images = await create_internet_images(package_id, movie_title, movie_year, content.get("image_queries", []))
         update_package(
             package_id,
             {
@@ -466,12 +436,14 @@ async def generate_package_task(package_id: str) -> None:
                 "youtube_description": content.get("youtube_description", ""),
                 "youtube_hashtags": content.get("youtube_hashtags", []),
                 "source_links": content.get("source_links", []),
+                "image_queries": content.get("image_queries", []),
                 "images": images,
                 "generator_meta": {
                     "generated_by": content.get("generated_by"),
                     "gemini_error": content.get("gemini_error"),
                     "brand_style": BRAND_STYLE,
-                    "image_source": "final_video_frames",
+                    "image_source": "internet_wikimedia_commons",
+                    "telegram_mode": "single_album_post_caption",
                 },
             },
         )
@@ -480,53 +452,46 @@ async def generate_package_task(package_id: str) -> None:
 
 
 async def publish_to_telegram(package: dict[str, Any]) -> dict[str, Any]:
-    """Публикует Telegram album и отдельный HTML-пост в канал."""
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
     if not TELEGRAM_CHANNEL_ID:
         raise RuntimeError("TELEGRAM_CHANNEL_ID не задан")
 
-    text = telegram_html(package.get("telegram_text_uk") or "")
+    caption = compact_caption(package.get("telegram_text_uk") or "")
     images = package.get("images") or []
     api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
     async with httpx.AsyncClient(timeout=120) as client:
-        sent_media = None
-        if images:
-            media: list[dict[str, Any]] = []
-            files: dict[str, tuple[str, bytes, str]] = {}
-            for idx, item in enumerate(images[:5]):
-                path = Path(item["local_path"])
-                if not path.exists():
-                    continue
-                attach_name = f"photo{idx}"
-                media.append({"type": "photo", "media": f"attach://{attach_name}"})
-                files[attach_name] = (path.name, path.read_bytes(), "image/jpeg")
+        media: list[dict[str, Any]] = []
+        files: dict[str, tuple[str, bytes, str]] = {}
+        for idx, item in enumerate(images[:5]):
+            path = Path(item.get("local_path", ""))
+            if not path.exists():
+                continue
+            attach_name = f"photo{idx}"
+            item_payload: dict[str, Any] = {"type": "photo", "media": f"attach://{attach_name}"}
+            if idx == 0 and caption:
+                item_payload["caption"] = caption
+                item_payload["parse_mode"] = "HTML"
+            media.append(item_payload)
+            files[attach_name] = (path.name, path.read_bytes(), "image/jpeg")
 
-            if media:
-                response = await client.post(
-                    f"{api}/sendMediaGroup",
-                    data={"chat_id": TELEGRAM_CHANNEL_ID, "media": json.dumps(media, ensure_ascii=False)},
-                    files=files,
-                )
-                response.raise_for_status()
-                sent_media = response.json()
+        if not media:
+            raise RuntimeError("Нет изображений для Telegram album-поста")
 
-        sent_text = None
-        if text:
-            response = await client.post(
-                f"{api}/sendMessage",
-                json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            )
-            response.raise_for_status()
-            sent_text = response.json()
+        response = await client.post(
+            f"{api}/sendMediaGroup",
+            data={"chat_id": TELEGRAM_CHANNEL_ID, "media": json.dumps(media, ensure_ascii=False)},
+            files=files,
+        )
+        response.raise_for_status()
+        sent_media = response.json()
 
-    return {"target": "telegram", "status": "success", "media": sent_media, "message": sent_text}
+    return {"target": "telegram", "status": "success", "mode": "single_album_post", "media": sent_media}
 
 
 @router.post("/api/jobs/{job_id}/generate-package")
 def generate_package(job_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Создаёт content package после готового рендера."""
     state = read_job_state(job_id)
     package_id = uuid.uuid4().hex[:16]
     payload = {
@@ -547,7 +512,6 @@ def generate_package(job_id: str, background_tasks: BackgroundTasks) -> dict[str
 
 @router.get("/api/publish-packages/{package_id}")
 def get_publish_package(package_id: str) -> JSONResponse:
-    """Возвращает JSON для UI-предпросмотра."""
     path = package_dir(package_id) / "package.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Контент-пакет не найден")
@@ -556,7 +520,6 @@ def get_publish_package(package_id: str) -> JSONResponse:
 
 @router.get("/api/publish-packages/{package_id}/images/{filename}")
 def get_publish_image(package_id: str, filename: str) -> FileResponse:
-    """Отдаёт фирменные картинки для предпросмотра и Telegram."""
     if "/" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Некорректное имя файла")
     path = package_dir(package_id) / "images" / filename
@@ -567,18 +530,16 @@ def get_publish_image(package_id: str, filename: str) -> FileResponse:
 
 @router.post("/api/publish-packages/{package_id}/regenerate-text")
 def regenerate_text(package_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Перегенерирует весь пакет: текст + кадры."""
     path = package_dir(package_id) / "package.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Контент-пакет не найден")
-    update_package(package_id, {"status": "queued", "message": "Перегенерация текста и кадров"})
+    update_package(package_id, {"status": "queued", "message": "Перегенерация текста и интернет-изображений"})
     background_tasks.add_task(generate_package_task, package_id)
     return {"package_id": package_id, "status_url": f"/api/publish-packages/{package_id}"}
 
 
 @router.post("/api/publish-packages/{package_id}/publish")
 async def publish_package(package_id: str, targets: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Публикует пакет. В MVP реально включён Telegram."""
     path = package_dir(package_id) / "package.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Контент-пакет не найден")
@@ -595,10 +556,8 @@ async def publish_package(package_id: str, targets: dict[str, Any] | None = None
             results.append(await publish_to_telegram(package))
         except Exception as exc:
             results.append({"target": "telegram", "status": "failed", "error_message": str(exc)})
-
     if "tiktok" in requested:
         results.append({"target": "tiktok", "status": "pending_config", "message": "Нужны TikTok OAuth данные и approval Content Posting API"})
-
     if "youtube" in requested:
         results.append({"target": "youtube", "status": "pending_config", "message": "Нужны YouTube OAuth refresh token и включённый YouTube Data API"})
 
