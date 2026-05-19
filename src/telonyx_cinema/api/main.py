@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from telonyx_cinema.api.publishing import router as publishing_router
 
-APP_VERSION = "dialogue-shorts-v19-title-timing-center-pop-subs-2026-05-19"
+APP_VERSION = "dialogue-shorts-v20-better-subtitle-timing-2026-05-19"
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/data/storage"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1200"))
 ENABLE_WHISPER = os.getenv("ENABLE_WHISPER", "true").lower() == "true"
@@ -25,9 +25,9 @@ FFPROBE = os.getenv("FFPROBE_BIN", "ffprobe")
 
 LANGUAGE_LABELS = {"auto": "Auto", "ru": "Русский", "en": "English", "uk": "Українська"}
 LANGUAGE_PROMPTS = {
-    "ru": "Точная расшифровка русской речи из фильма. Сохраняй имена, паузы и короткие реплики.",
-    "uk": "Точна розшифровка української мови з фільму. Зберігай імена, паузи та короткі репліки.",
-    "en": "Accurate movie dialogue transcription. Preserve names, pauses and short replies.",
+    "ru": "Точная расшифровка русской речи из фильма. Не пропускай короткие тихие реплики. Сохраняй имена, паузы и короткие ответы.",
+    "uk": "Точна розшифровка української мови з фільму. Не пропускай короткі тихі репліки. Зберігай імена, паузи та короткі відповіді.",
+    "en": "Accurate movie dialogue transcription. Do not skip short quiet replies. Preserve names, pauses and short answers.",
 }
 
 app = FastAPI(title="TXC Ukraine Cinema Finalizer", version=APP_VERSION)
@@ -130,6 +130,54 @@ def wrap_text(text: str, max_chars: int = 28) -> str:
     return "\\N".join(lines[:2])
 
 
+def postprocess_segments(raw_segments: list[dict[str, Any]], video_duration: float) -> list[dict[str, Any]]:
+    """Доводит тайминги Whisper под cinematic subtitles.
+
+    Whisper часто даёт слишком ранний end и иногда дробит одну реплику на микросегменты.
+    Здесь мы мягко склеиваем близкие куски, продлеваем хвост фразы и не даём сабам налезать друг на друга.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for item in sorted(raw_segments, key=lambda s: float(s.get("start", 0.0))):
+        text = clean_text(str(item.get("text", "")))
+        if not text:
+            continue
+        start = max(0.0, float(item.get("start", 0.0)) - 0.04)
+        end = min(video_duration, max(start + 0.35, float(item.get("end", start + 0.35))))
+        if cleaned:
+            prev = cleaned[-1]
+            gap = start - float(prev["end"])
+            merged_text = clean_text(str(prev["text"]) + " " + text)
+            # Если пауза почти отсутствует и фраза остаётся читабельной в 1-2 строки — склеиваем.
+            if -0.05 <= gap <= 0.22 and len(merged_text) <= 72:
+                prev["text"] = merged_text
+                prev["end"] = max(float(prev["end"]), end)
+                continue
+        cleaned.append({"start": start, "end": end, "text": text})
+
+    polished: list[dict[str, Any]] = []
+    for index, item in enumerate(cleaned):
+        text = str(item["text"])
+        start = float(item["start"])
+        end = float(item["end"])
+        next_start = float(cleaned[index + 1]["start"]) if index + 1 < len(cleaned) else video_duration
+
+        # Чем длиннее фраза, тем дольше она должна висеть. Для коротких ответов минимум 1 сек.
+        min_duration = min(2.8, max(1.0, len(text) * 0.052))
+        tail = min(0.65, max(0.26, len(text) * 0.008))
+        wanted_end = max(end + tail, start + min_duration)
+
+        # Не налезаем на следующий саб. Если между репликами пауза короткая — оставляем микрозазор.
+        safe_next_limit = max(start + 0.55, next_start - 0.07)
+        final_end = min(video_duration, wanted_end, safe_next_limit)
+
+        # Если из-за следующей фразы саб получился слишком коротким — чуть раньше показываем его.
+        if final_end - start < 0.82:
+            start = max(0.0, final_end - 0.82)
+
+        polished.append({"start": round(start, 3), "end": round(final_end, 3), "text": text})
+    return polished
+
+
 def write_title_ass(path: Path, movie_title: str, movie_year: str, duration: float) -> None:
     title = ass_escape((movie_title.strip() or "MOVIE").upper())
     year = ass_escape(movie_year.strip() or "YEAR")
@@ -151,8 +199,8 @@ Style: Axis,DejaVu Sans,16,&H66EED322,&H000000FF,&H00000000,&H00000000,0,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 1,{ass_time(0)},{ass_time(intro_end)},Axis,,0,0,0,,{{\\move(-120,{axis_y},74,{axis_y},0,760)\\t({int(intro_exit_start*1000)}, {int(intro_end*1000)},\\move(74,{axis_y},-120,{axis_y}))\\fad(120,160)}}{{\\p1}}m 0 0 l 4 0 l 4 116 l 0 116{{\\p0}}
-Dialogue: 3,{ass_time(0.02)},{ass_time(intro_end)},TitleBlock,,0,0,0,,{{\\an7\\move(-920,{title_y},96,{title_y},0,760)\\t({int(intro_exit_start*1000)}, {int(intro_end*1000)},\\move(96,{title_y},-920,{title_y}))\\blur0.08\\fad(120,160)}}{{\\fs18\\fsp2.4\\c&H9CFFFFFF&\\bord0.35}}TXC UKRAINE\\N{{\\fs58\\fsp0.25\\c&H00F6F2EA&\\bord1.65}}{title}\\N{{\\fs30\\fsp3.4\\c&H00EED322&\\bord0.85}}{year}
+Dialogue: 1,{ass_time(0)},{ass_time(intro_end)},Axis,,0,0,0,,{{\\move(-120,{axis_y},74,{axis_y},0,760)\\t({int(intro_exit_start*1000)},{int(intro_end*1000)},\\move(74,{axis_y},-120,{axis_y}))\\fad(120,160)}}{{\\p1}}m 0 0 l 4 0 l 4 116 l 0 116{{\\p0}}
+Dialogue: 3,{ass_time(0.02)},{ass_time(intro_end)},TitleBlock,,0,0,0,,{{\\an7\\move(-920,{title_y},96,{title_y},0,760)\\t({int(intro_exit_start*1000)},{int(intro_end*1000)},\\move(96,{title_y},-920,{title_y}))\\blur0.08\\fad(120,160)}}{{\\fs18\\fsp2.4\\c&H9CFFFFFF&\\bord0.35}}TXC UKRAINE\\N{{\\fs58\\fsp0.25\\c&H00F6F2EA&\\bord1.65}}{title}\\N{{\\fs30\\fsp3.4\\c&H00EED322&\\bord0.85}}{year}
 Dialogue: 1,{ass_time(outro_start)},{ass_time(duration)},Axis,,0,0,0,,{{\\move(-120,{axis_y},74,{axis_y},0,680)\\t({max(0,int((duration-outro_start-0.85)*1000))},{int((duration-outro_start)*1000)},\\move(74,{axis_y},-120,{axis_y}))\\fad(120,190)}}{{\\p1}}m 0 0 l 4 0 l 4 116 l 0 116{{\\p0}}
 Dialogue: 3,{ass_time(outro_start)},{ass_time(duration)},TitleBlock,,0,0,0,,{{\\an7\\move(-920,{title_y},96,{title_y},0,680)\\t({max(0,int((duration-outro_start-0.85)*1000))},{int((duration-outro_start)*1000)},\\move(96,{title_y},-920,{title_y}))\\blur0.08\\fad(120,190)}}{{\\fs18\\fsp2.4\\c&H9CFFFFFF&\\bord0.35}}TXC UKRAINE\\N{{\\fs58\\fsp0.25\\c&H00F6F2EA&\\bord1.65}}{title}\\N{{\\fs30\\fsp3.4\\c&H00EED322&\\bord0.85}}{year}
 """, encoding="utf-8")
@@ -178,8 +226,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not text:
             continue
         start = float(seg.get("start", 0))
-        end = max(start + 0.45, float(seg.get("end", start + 1.2)))
-        dur_ms = max(450, int((end - start) * 1000))
+        end = max(start + 0.82, float(seg.get("end", start + 1.0)))
+        dur_ms = max(820, int((end - start) * 1000))
         pop_in = min(180, max(80, dur_ms // 5))
         pop_out_start = max(pop_in + 40, dur_ms - 170)
         effect = f"{{\\an5\\pos(540,960)\\fad(45,85)\\blur0.45\\fscx92\\fscy92\\t(0,{pop_in},\\fscx103\\fscy103\\blur0.15)\\t({pop_in},{pop_in+120},\\fscx100\\fscy100)\\t({pop_out_start},{dur_ms},\\fscx96\\fscy96\\blur0.55)}}"
@@ -206,25 +254,43 @@ def transcribe(job_id: str, input_path: Path, language: str) -> tuple[list[dict[
     extract_audio(job_id, input_path, audio_path)
     write_state(job_id, {"subtitles_status": "loading_model", "subtitles_language_requested": selected, "subtitles_language_label": LANGUAGE_LABELS[selected], "message": f"Загружаю Whisper {WHISPER_MODEL}. Язык: {LANGUAGE_LABELS[selected]}"})
     model = WhisperModel(WHISPER_MODEL, device=MODEL_DEVICE, compute_type=COMPUTE_TYPE)
-    kwargs: dict[str, Any] = {"beam_size": 5, "best_of": 5, "temperature": 0.0, "vad_filter": True, "condition_on_previous_text": False, "compression_ratio_threshold": 2.4, "log_prob_threshold": -1.0, "no_speech_threshold": 0.55}
+    kwargs: dict[str, Any] = {
+        "beam_size": 5,
+        "best_of": 5,
+        "temperature": 0.0,
+        "vad_filter": False,
+        "word_timestamps": True,
+        "condition_on_previous_text": True,
+        "compression_ratio_threshold": 2.8,
+        "log_prob_threshold": -1.2,
+        "no_speech_threshold": 0.28,
+    }
     if selected != "auto":
         kwargs["language"] = selected
         kwargs["initial_prompt"] = LANGUAGE_PROMPTS.get(selected, "")
     try:
         segments_iter, info = model.transcribe(str(audio_path), **kwargs)
     except TypeError as exc:
-        log(job_id, f"Whisper TypeError, retry with minimal kwargs: {exc}")
-        minimal_kwargs = {"beam_size": 5, "best_of": 5, "temperature": 0.0, "vad_filter": False}
-        if selected != "auto":
-            minimal_kwargs["language"] = selected
-        segments_iter, info = model.transcribe(str(audio_path), **minimal_kwargs)
+        log(job_id, f"Whisper TypeError, retry with compatible kwargs: {exc}")
+        kwargs.pop("word_timestamps", None)
+        segments_iter, info = model.transcribe(str(audio_path), **kwargs)
 
     segments = []
     for seg in segments_iter:
         text = clean_text(seg.text)
         if text:
-            segments.append({"start": float(seg.start), "end": float(seg.end), "text": text})
-    meta = {"requested_language": selected, "detected_language": getattr(info, "language", selected), "detected_language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 4), "model": WHISPER_MODEL, "device": MODEL_DEVICE, "compute_type": COMPUTE_TYPE, "segments": len(segments)}
+            start = float(seg.start)
+            end = float(seg.end)
+            words = getattr(seg, "words", None)
+            if words:
+                word_starts = [float(w.start) for w in words if getattr(w, "start", None) is not None]
+                word_ends = [float(w.end) for w in words if getattr(w, "end", None) is not None]
+                if word_starts:
+                    start = min(start, min(word_starts))
+                if word_ends:
+                    end = max(end, max(word_ends))
+            segments.append({"start": start, "end": end, "text": text})
+    meta = {"requested_language": selected, "detected_language": getattr(info, "language", selected), "detected_language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 4), "model": WHISPER_MODEL, "device": MODEL_DEVICE, "compute_type": COMPUTE_TYPE, "segments": len(segments), "vad_filter": False, "word_timestamps": True}
     log(job_id, "Whisper meta: " + json.dumps(meta, ensure_ascii=False))
     return segments, meta
 
@@ -252,7 +318,10 @@ def render_video(job_id: str) -> None:
         subs_file: Path | None = None
         if state.get("subtitles_enabled"):
             write_state(job_id, {"progress": 34, "subtitles_requested": True, "subtitles_status": "processing", "message": f"Распознаю диалоги. Язык: {LANGUAGE_LABELS.get(state.get('language', 'auto'), 'Auto')}"})
-            segments, meta = transcribe(job_id, input_path, state.get("language", "auto"))
+            raw_segments, meta = transcribe(job_id, input_path, state.get("language", "auto"))
+            segments = postprocess_segments(raw_segments, duration)
+            meta["raw_segments"] = len(raw_segments)
+            meta["postprocessed_segments"] = len(segments)
             if segments:
                 write_subs_ass(subs_ass, segments)
                 subs_file = subs_ass
