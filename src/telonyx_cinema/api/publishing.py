@@ -238,7 +238,7 @@ def style_internet_image(raw_image: Path, target: Path, index: int) -> None:
     draw.rectangle((62, 96, 67, height - 128), fill=(34, 211, 238, 155))
     small_font = load_font(24, bold=True)
     number_font = load_font(24, bold=True)
-    draw.text((86, 70), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 205))
+    draw.text((86, 70), "TELONYX.APP", font=small_font, fill=(230, 238, 246, 205))
     draw.text((86, height - 92), BRAND_WATERMARK, font=small_font, fill=(255, 255, 255, 145))
     draw.text((width - 126, height - 92), f"0{index}", font=number_font, fill=(34, 211, 238, 205))
     glow = overlay.filter(ImageFilter.GaussianBlur(5))
@@ -258,7 +258,7 @@ def create_fallback_image(target: Path, movie_title: str, movie_year: str, index
     draw.rectangle((84, 140, 90, height - 160), fill=(34, 211, 238, 190))
     title_font = load_font(42, bold=True)
     small_font = load_font(24, bold=True)
-    draw.text((112, 95), "TXC UKRAINE", font=small_font, fill=(230, 238, 246, 210))
+    draw.text((112, 95), "TELONYX.APP", font=small_font, fill=(230, 238, 246, 210))
     title = movie_title.upper()
     max_chars = 26
     lines = [title[i:i + max_chars] for i in range(0, min(len(title), max_chars * 3), max_chars)]
