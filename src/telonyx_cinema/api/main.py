@@ -445,8 +445,10 @@ def render_tiktok_video(job_id: str) -> None:
 
 def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
+    clean_url = url.split("?")[0] if "?" in url else url
     cmd = [
         YT_DLP_BIN,
+        "-f", "b",
         "-o", str(output_path),
         "--no-playlist",
         "--no-warnings",
@@ -469,8 +471,8 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
         log(job_id, f"No cookies found: YT_COOKIES_FILE={repr(YT_COOKIES_FILE)}, YT_DLP_COOKIES_BASE64={'set' if os.getenv('YT_DLP_COOKIES_BASE64') else 'NOT SET'}")
     if cookies_arg:
         cmd.extend(["--cookies", cookies_arg])
-    cmd.append(url)
-    log(job_id, f"Downloading YouTube video: {url}")
+    cmd.append(clean_url)
+    log(job_id, f"Downloading YouTube video: {clean_url}")
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
     log(job_id, result.stdout[-3000:])
     if result.returncode != 0:
