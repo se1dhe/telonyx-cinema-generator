@@ -462,7 +462,9 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     def build_cmd(fmt: str) -> list[str]:
         c = [
             YT_DLP_BIN, "--no-playlist", "--newline",
-            "--extractor-args", "youtube:player_client=web,android",
+            "--socket-timeout", "30",
+            "--js-runtimes", "node",
+            "--remote-components", "ejs:github",
             "--merge-output-format", "mp4",
             "--remux-video", "mp4",
             "--format-sort", "res",
