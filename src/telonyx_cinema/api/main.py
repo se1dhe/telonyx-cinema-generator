@@ -435,26 +435,29 @@ def extract_youtube_metadata(job_id: str, url: str) -> dict:
         return {}
 
 
-def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -> tuple[list[str], str]:
+def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -> tuple[list[str], str, str]:
     fallback_tags = ["l2watcher", "lineage2", "pvp", "siege", "fyp", "рекомендации", "л2", "mmorpg", "рек", "gaming"]
+    fallback_title = ""
     fallback_desc = ""
 
     if not GEMINI_KEY:
-        return fallback_tags, fallback_desc
+        return fallback_tags, fallback_title, fallback_desc
 
-    title = youtube_meta.get("title", "")
+    raw_title = youtube_meta.get("title", "")
+    clean_title = re.sub(r"#\S+", "", raw_title).strip()
     desc = youtube_meta.get("description", "")[:500]
     yt_tags = youtube_meta.get("tags", [])
 
     prompt = (
-        f"Ты SMM-менеджер для Lineage 2 контента. По данным видео верни JSON с двумя полями:\n"
-        f"- description: короткое цепляющее описание для TikTok (1-2 предложения, на русском, с эмодзи)\n"
+        f"Ты SMM-менеджер для Lineage 2 контента. По данным видео верни JSON с тремя полями:\n"
+        f"- title: перефразированное цепляющее название для TikTok (коротко, на русском, без хештегов, можно с эмодзи)\n"
+        f"- description: короткое описание для TikTok (1-2 предложения, на русском, с эмодзи)\n"
         f"- tags: массив из 10 хештегов (без решётки, строки)\n\n"
         f"Правила для тегов: обязательно #l2watcher первый, добавь 1-2 популярных "
         f"(для TikTok: #fyp #рекомендации, для YouTube: #shorts), "
         f"остальные — специфичные под это видео: класс, тип контента (pvp/siege/boss/farm/olympiad/craft), "
         f"сервер (essence/classic/interlude), на русском и английском. Не повторяйся.\n\n"
-        f"Название: {title}\n"
+        f"Оригинальное название (очищено от тегов): {clean_title}\n"
         f"Описание: {desc}\n"
         f"Теги с YouTube: {' '.join(yt_tags)}\n"
         f"Платформа: {platform}"
@@ -471,19 +474,20 @@ def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -
         )
         if r.status_code != 200:
             log(job_id, f"Gemini error {r.status_code}: {r.text[:200]}")
-            return fallback_tags, fallback_desc
+            return fallback_tags, fallback_title, fallback_desc
         data = r.json()
         text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
         parsed = json.loads(text)
         tags = [t.lower().lstrip("#") for t in parsed.get("tags", []) if t.strip()]
-        description = parsed.get("description", "")
+        g_title = parsed.get("title", "")
+        g_desc = parsed.get("description", "")
         if tags:
-            log(job_id, f"Gemini OK: desc={description[:50]}..., {len(tags)} tags")
-            return tags[:10], description
+            log(job_id, f"Gemini OK: title={g_title[:50]}..., {len(tags)} tags")
+            return tags[:10], g_title, g_desc
     except Exception as exc:
         log(job_id, f"Gemini exception: {exc}")
 
-    return fallback_tags, fallback_desc
+    return fallback_tags, fallback_title, fallback_desc
 
 
 def render_tiktok_video(job_id: str) -> None:
@@ -495,6 +499,7 @@ def render_tiktok_video(job_id: str) -> None:
         youtube_url = state.get("youtube_url", "").strip()
         yt_meta: dict = {}
         suggested_tags: list[str] = []
+        suggested_title: str = ""
         suggested_description: str = ""
         if youtube_url:
             write_tiktok_state(job_id, {"status": "processing", "progress": 5, "message": "Скачиваю видео с YouTube..."})
@@ -502,7 +507,7 @@ def render_tiktok_video(job_id: str) -> None:
             state["input_path"] = str(downloaded)
             write_tiktok_state(job_id, {"progress": 15, "message": "Извлекаю метаданные и подбираю теги..."})
             yt_meta = extract_youtube_metadata(job_id, youtube_url)
-            suggested_tags, suggested_description = suggest_l2_tags(job_id, yt_meta, "tiktok")
+            suggested_tags, suggested_title, suggested_description = suggest_l2_tags(job_id, yt_meta, "tiktok")
             log(job_id, f"Suggested tags ({len(suggested_tags)}): {' '.join('#'+t for t in suggested_tags)}")
             write_tiktok_state(job_id, {"progress": 18, "message": "Видео скачано, теги подобраны"})
         input_path = Path(state["input_path"])
@@ -535,8 +540,9 @@ def render_tiktok_video(job_id: str) -> None:
             "download_url": f"/api/tiktok-jobs/{job_id}/download",
             "duration": duration,
             "suggested_tags": suggested_tags,
+            "suggested_title": suggested_title,
             "suggested_description": suggested_description,
-            "youtube_meta_title": yt_meta.get("title", "") or youtube_url.split("?")[0] if youtube_url else "",
+            "youtube_meta_title": suggested_title or yt_meta.get("title", "") or youtube_url if youtube_url else "Lineage 2",
         })
     except Exception as exc:
         log(job_id, f"FAILED: {exc}")
