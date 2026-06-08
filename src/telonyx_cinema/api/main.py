@@ -412,30 +412,12 @@ except Exception as _e:
     print(f"[startup] yt-dlp version check failed: {_e}")
 
 
-def extract_youtube_metadata(job_id: str, url: str) -> dict:
-    clean = url.split("?")[0] if "?" in url else url
-    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "30", "--remote-components", "ejs:github", "--js-runtimes", "node"]
-    cookies_arg: str | None = None
-    if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
-        cookies_arg = YT_COOKIES_FILE
-        log(job_id, f"meta: using cookies file {YT_COOKIES_FILE}")
-    elif YT_COOKIES_BASE64:
-        cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
-        try:
-            raw = base64.b64decode(YT_COOKIES_BASE64)
-            cp.write_text(raw.decode("utf-8"), encoding="utf-8")
-            cookies_arg = str(cp)
-            log(job_id, f"meta: decoded YT_DLP_COOKIES_BASE64 ({len(raw)} bytes)")
-        except Exception as exc:
-            log(job_id, f"meta: cookies decode failed: {exc}")
-    if cookies_arg:
-        cmd.extend(["--cookies", cookies_arg])
-    cmd.append(clean)
-    log(job_id, f"meta cmd: {' '.join(cmd)}")
+def _run_meta_cmd(job_id: str, cmd: list[str]) -> dict:
+    log(job_id, f"meta: {' '.join(cmd)}")
     try:
         r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         if r.returncode != 0:
-            log(job_id, f"meta stderr: {r.stderr[-500:]}")
+            log(job_id, f"meta fail (exit={r.returncode}): {r.stderr[-400:]}")
             return {}
         data = json.loads(r.stdout)
         meta = {
@@ -444,11 +426,53 @@ def extract_youtube_metadata(job_id: str, url: str) -> dict:
             "tags": data.get("tags", []) or [],
             "channel": data.get("channel", "") or "",
         }
-        log(job_id, f"YouTube meta OK: title=[{meta['title'][:80]}] tags={len(meta['tags'])}")
+        log(job_id, f"meta OK: title=[{meta['title'][:80]}] tags={len(meta['tags'])}")
         return meta
     except Exception as exc:
         log(job_id, f"meta exception: {exc}")
         return {}
+
+def extract_youtube_metadata(job_id: str, url: str) -> dict:
+    clean = url.split("?")[0] if "?" in url else url
+
+    def base_cmd() -> list[str]:
+        return [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "30"]
+
+    def add_cookies(cmd: list[str]) -> None:
+        if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
+            cmd.extend(["--cookies", YT_COOKIES_FILE])
+            log(job_id, f"meta: +cookies file {YT_COOKIES_FILE}")
+        elif YT_COOKIES_BASE64:
+            cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
+            try:
+                raw = base64.b64decode(YT_COOKIES_BASE64)
+                cp.write_text(raw.decode("utf-8"), encoding="utf-8")
+                cmd.extend(["--cookies", str(cp)])
+                log(job_id, f"meta: +decoded cookies ({len(raw)} bytes)")
+            except Exception as exc:
+                log(job_id, f"meta: cookies decode err: {exc}")
+
+    # Попытка 1: быстро, без remote-components
+    c1 = base_cmd()
+    c1.append(clean)
+    meta = _run_meta_cmd(job_id, c1)
+    if meta:
+        return meta
+
+    # Попытка 2: с remote-components (нужно для нестандартных Shorts)
+    c2 = base_cmd()
+    c2 += ["--remote-components", "ejs:github", "--js-runtimes", "node"]
+    c2.append(clean)
+    meta = _run_meta_cmd(job_id, c2)
+    if meta:
+        return meta
+
+    # Попытка 3: с cookies (некоторые видео требуют авторизации)
+    c3 = base_cmd()
+    c3 += ["--remote-components", "ejs:github", "--js-runtimes", "node"]
+    add_cookies(c3)
+    c3.append(clean)
+    return _run_meta_cmd(job_id, c3)
 
 
 def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -> tuple[list[str], str, str]:
