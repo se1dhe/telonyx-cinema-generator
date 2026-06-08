@@ -397,41 +397,55 @@ def render_video(job_id: str) -> None:
 
 GEMINI_KEY = GEMINI_API_KEY
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+print(f"[startup] GEMINI_API_KEY={'set' if GEMINI_KEY else 'NOT SET'} (len={len(GEMINI_KEY)})")
+print(f"[startup] YT_DLP_BIN={YT_DLP_BIN}")
+print(f"[startup] LOGO_PATH={LOGO_PATH} exists={Path(LOGO_PATH).exists()}")
+print(f"[startup] YT_COOKIES_FILE={YT_COOKIES_FILE or 'not set'}")
+print(f"[startup] YT_COOKIES_BASE64={'set' if YT_COOKIES_BASE64 else 'not set'}")
+import subprocess as _sp
+try:
+    _vr = _sp.run([YT_DLP_BIN, "--version"], capture_output=True, text=True, timeout=10)
+    print(f"[startup] yt-dlp version: {_vr.stdout.strip() or _vr.stderr.strip()}")
+except Exception as _e:
+    print(f"[startup] yt-dlp version check failed: {_e}")
 
 
 def extract_youtube_metadata(job_id: str, url: str) -> dict:
     clean = url.split("?")[0] if "?" in url else url
-    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings"]
+    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "30", "--remote-components", "ejs:github", "--js-runtimes", "node"]
     cookies_arg: str | None = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
         cookies_arg = YT_COOKIES_FILE
+        log(job_id, f"meta: using cookies file {YT_COOKIES_FILE}")
     elif YT_COOKIES_BASE64:
         cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
         try:
             raw = base64.b64decode(YT_COOKIES_BASE64)
             cp.write_text(raw.decode("utf-8"), encoding="utf-8")
             cookies_arg = str(cp)
-        except Exception:
-            pass
+            log(job_id, f"meta: decoded YT_DLP_COOKIES_BASE64 ({len(raw)} bytes)")
+        except Exception as exc:
+            log(job_id, f"meta: cookies decode failed: {exc}")
     if cookies_arg:
         cmd.extend(["--cookies", cookies_arg])
     cmd.append(clean)
+    log(job_id, f"meta cmd: {' '.join(cmd)}")
     try:
-        r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         if r.returncode != 0:
-            log(job_id, f"metadata extract failed: {r.stderr[-300:]}")
+            log(job_id, f"meta stderr: {r.stderr[-500:]}")
             return {}
         data = json.loads(r.stdout)
         meta = {
             "title": data.get("title", ""),
-            "description": data.get("description", ""),
+            "description": data.get("description", "") or "",
             "tags": data.get("tags", []) or [],
-            "channel": data.get("channel", ""),
+            "channel": data.get("channel", "") or "",
         }
-        log(job_id, f"YouTube meta: title={meta['title'][:60]}, tags={len(meta['tags'])}")
+        log(job_id, f"YouTube meta OK: title=[{meta['title'][:80]}] tags={len(meta['tags'])}")
         return meta
     except Exception as exc:
-        log(job_id, f"metadata extract error: {exc}")
+        log(job_id, f"meta exception: {exc}")
         return {}
 
 
@@ -441,7 +455,10 @@ def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -
     fallback_desc = ""
 
     if not GEMINI_KEY:
+        log(job_id, "Gemini: no key (GEMINI_API_KEY not set), using fallback tags")
         return fallback_tags, fallback_title, fallback_desc
+
+    log(job_id, f"Gemini: key present (len={len(GEMINI_KEY)})")
 
     raw_title = youtube_meta.get("title", "")
     clean_title = re.sub(r"#\S+", "", raw_title).strip()
@@ -463,6 +480,7 @@ def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -
         f"Платформа: {platform}"
     )
 
+    log(job_id, f"Gemini: sending prompt (len={len(prompt)}, title='{clean_title[:60]}')")
     try:
         r = requests.post(
             f"{GEMINI_URL}?key={GEMINI_KEY}",
@@ -473,17 +491,20 @@ def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -
             timeout=30,
         )
         if r.status_code != 200:
-            log(job_id, f"Gemini error {r.status_code}: {r.text[:200]}")
+            log(job_id, f"Gemini HTTP {r.status_code}: {r.text[:300]}")
             return fallback_tags, fallback_title, fallback_desc
         data = r.json()
         text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        log(job_id, f"Gemini raw response: {text[:200]}")
         parsed = json.loads(text)
         tags = [t.lower().lstrip("#") for t in parsed.get("tags", []) if t.strip()]
         g_title = parsed.get("title", "")
         g_desc = parsed.get("description", "")
         if tags:
-            log(job_id, f"Gemini OK: title={g_title[:50]}..., {len(tags)} tags")
+            log(job_id, f"Gemini OK: title='{g_title[:60]}' {len(tags)} tags")
             return tags[:10], g_title, g_desc
+        else:
+            log(job_id, f"Gemini: parsed but no tags, full response={text[:200]}")
     except Exception as exc:
         log(job_id, f"Gemini exception: {exc}")
 
