@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
+import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ LOGO_PATH = os.getenv("LOGO_PATH", str(Path(__file__).parent / "static" / "logo.
 YT_DLP_BIN = os.getenv("YT_DLP_BIN", "yt-dlp")
 YT_COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "") or os.getenv("YT_DLP_COOKIES_FILE", "")
 YT_COOKIES_BASE64 = os.getenv("YT_DLP_COOKIES_BASE64", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 LANGUAGE_LABELS = {"auto": "Auto", "ru": "Русский", "en": "English", "uk": "Українська"}
 LANGUAGE_PROMPTS = {
@@ -393,28 +395,8 @@ def render_video(job_id: str) -> None:
         write_state(job_id, {"status": "failed", "progress": 100, "subtitles_status": "failed" if state.get("subtitles_enabled") else state.get("subtitles_status", "disabled"), "subtitles_error": str(exc), "message": str(exc)})
 
 
-L2_TAG_DB: list[dict] = [
-    {"tag": "l2watcher", "kw": ["l2watcher", "л2вотчер"], "w": 10, "p": "both"},
-    {"tag": "lineage2", "kw": ["lineage", "l2", "линейка"], "w": 10, "p": "both"},
-    {"tag": "mmorpg", "kw": ["mmorpg", "мморпг", "rpg"], "w": 8, "p": "both"},
-    {"tag": "pvp", "kw": ["pvp", "пвп", "battle", "clan war", "pk"], "w": 9, "p": "both"},
-    {"tag": "siege", "kw": ["siege", "осада", "castle", "fortress"], "w": 9, "p": "both"},
-    {"tag": "olympiad", "kw": ["olympiad", "олимп", "arena"], "w": 7, "p": "both"},
-    {"tag": "epicboss", "kw": ["boss", "raid", "epic", "queen ant", "zaken", "baium", "valakas", "antharas", "core", "orfen"], "w": 8, "p": "both"},
-    {"tag": "farm", "kw": ["farm", "grind", "level", "exp", "adena", "аден"], "w": 6, "p": "both"},
-    {"tag": "craft", "kw": ["craft", "enchant", "weapon", "armor"], "w": 5, "p": "both"},
-    {"tag": "essence", "kw": ["essence", "l2essence"], "w": 7, "p": "both"},
-    {"tag": "classic", "kw": ["classic", "l2classic", "interlude", "high five", "gracia"], "w": 7, "p": "both"},
-    {"tag": "fyp", "kw": [], "w": 10, "p": "tiktok"},
-    {"tag": "рекомендации", "kw": [], "w": 9, "p": "tiktok"},
-    {"tag": "рек", "kw": [], "w": 8, "p": "tiktok"},
-    {"tag": "gameplay", "kw": ["gameplay", "game", "игра"], "w": 8, "p": "both"},
-    {"tag": "shorts", "kw": ["shorts"], "w": 7, "p": "youtube"},
-    {"tag": "gaming", "kw": ["gaming"], "w": 6, "p": "tiktok"},
-    {"tag": "л2", "kw": ["л2", "л2вотчер"], "w": 9, "p": "both"},
-    {"tag": "линейка2", "kw": ["линейка"], "w": 8, "p": "both"},
-    {"tag": "мморпг", "kw": ["мморпг"], "w": 6, "p": "both"},
-]
+GEMINI_KEY = GEMINI_API_KEY
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 
 def extract_youtube_metadata(job_id: str, url: str) -> dict:
@@ -440,31 +422,52 @@ def extract_youtube_metadata(job_id: str, url: str) -> dict:
         return {}
 
 
-def suggest_l2_tags(youtube_meta: dict, platform: str = "tiktok") -> list[str]:
-    text = f"{youtube_meta.get('title','')} {youtube_meta.get('description','')} {' '.join(youtube_meta.get('tags',[]))}".lower()
-    words = set(re.findall(r"[a-zа-яё0-9]+", text))
-    scored = []
-    for entry in L2_TAG_DB:
-        if entry["p"] not in ("both", platform):
-            continue
-        score = entry["w"]
-        if entry["kw"]:
-            matches = sum(1 for k in entry["kw"] if k in text)
-            if matches:
-                score += matches * 3
-            else:
-                score = max(1, score - 4)
-        scored.append((score, entry["tag"]))
-    scored.sort(key=lambda x: -x[0])
-    seen: set[str] = set()
-    result: list[str] = []
-    for _, tag in scored:
-        if tag not in seen:
-            seen.add(tag)
-            result.append(tag)
-        if len(result) >= 10:
-            break
-    return result
+def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -> list[str]:
+    fallback = ["l2watcher", "lineage2", "pvp", "siege", "fyp", "рекомендации", "л2", "mmorpg", "рек", "gaming"]
+
+    if not GEMINI_KEY:
+        return fallback
+
+    title = youtube_meta.get("title", "")
+    desc = youtube_meta.get("description", "")[:500]
+    yt_tags = youtube_meta.get("tags", [])
+
+    prompt = (
+        f"Ты экспертный хештег-менеджер для Lineage 2 контента в TikTok и YouTube Shorts. "
+        f"По названию и описанию видео придумай 10 самых релевантных и топовых тегов. "
+        f"Верни ТОЛЬКО теги через пробел без решётки, без пояснений, строго 10 слов. "
+        f"Теги должны быть релевантны Lineage 2 и этому конкретному видео. "
+        f"Обязательно включи #l2watcher в начало списка. "
+        f"Добавь 1-2 популярных тега вроде #fyp #рекомендации (для TikTok) или #shorts (для YouTube). "
+        f"Остальные — специфичные под видео: класс персонажа, тип контента (pvp/siege/boss/farm/olympiad/craft), "
+        f"сервер (essence/classic/interlude/highfive), на русском и английском. "
+        f"Не повторяйся. Не пиши лишнего.\n\n"
+        f"Название: {title}\n"
+        f"Описание: {desc}\n"
+        f"Теги с YouTube: {' '.join(yt_tags)}\n"
+        f"Платформа: {platform}"
+    )
+
+    try:
+        r = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            log(job_id, f"Gemini error {r.status_code}: {r.text[:200]}")
+            return fallback
+        data = r.json()
+        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        tags = text.strip().lower().split()
+        tags = [t.lstrip("#") for t in tags if t.strip()]
+        tags = tags[:10]
+        if tags:
+            return tags
+    except Exception as exc:
+        log(job_id, f"Gemini exception: {exc}")
+
+    return fallback
 
 
 def render_tiktok_video(job_id: str) -> None:
@@ -482,7 +485,7 @@ def render_tiktok_video(job_id: str) -> None:
             state["input_path"] = str(downloaded)
             write_tiktok_state(job_id, {"progress": 15, "message": "Извлекаю метаданные и подбираю теги..."})
             yt_meta = extract_youtube_metadata(job_id, youtube_url)
-            suggested_tags = suggest_l2_tags(yt_meta, "tiktok")
+            suggested_tags = suggest_l2_tags(job_id, yt_meta, "tiktok")
             log(job_id, f"Suggested tags ({len(suggested_tags)}): {' '.join('#'+t for t in suggested_tags)}")
             write_tiktok_state(job_id, {"progress": 18, "message": "Видео скачано, теги подобраны"})
         input_path = Path(state["input_path"])
