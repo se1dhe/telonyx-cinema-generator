@@ -401,7 +401,7 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0
 
 def extract_youtube_metadata(job_id: str, url: str) -> dict:
     clean = url.split("?")[0] if "?" in url else url
-    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "15", "--remote-components", "ejs:github", "--js-runtimes", "node"]
+    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings"]
     cookies_arg: str | None = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
         cookies_arg = YT_COOKIES_FILE
@@ -542,7 +542,7 @@ def render_tiktok_video(job_id: str) -> None:
             "suggested_tags": suggested_tags,
             "suggested_title": suggested_title,
             "suggested_description": suggested_description,
-            "youtube_meta_title": suggested_title or yt_meta.get("title", "") or youtube_url if youtube_url else "Lineage 2",
+            "youtube_meta_title": suggested_title or re.sub(r"#\S+", "", yt_meta.get("title", "")).strip() or youtube_url if youtube_url else "Lineage 2",
         })
     except Exception as exc:
         log(job_id, f"FAILED: {exc}")
