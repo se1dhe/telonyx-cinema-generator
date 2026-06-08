@@ -447,12 +447,9 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
     cmd = [
         YT_DLP_BIN,
-        "-f", "bv*+ba/b",
-        "--merge-output-format", "mp4",
         "-o", str(output_path),
         "--no-playlist",
         "--no-warnings",
-        "--extractor-args", "youtube:player_client=android",
     ]
     cookies_arg = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
