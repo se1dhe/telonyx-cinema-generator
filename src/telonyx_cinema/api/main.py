@@ -397,8 +397,6 @@ def render_tiktok_video(job_id: str) -> None:
     state = TIKTOK_JOBS[job_id]
     d = job_dir(job_id)
     logo_path = state.get("logo_path", LOGO_PATH)
-    rotation_map: dict[str, str] = {"none": "0", "slow": "PI/6*t", "medium": "PI/2*t", "fast": "PI*t"}
-    angle = rotation_map.get(state.get("rotation_speed", "slow"), "PI/6*t")
     logo_opacity = max(0.1, min(1.0, float(state.get("opacity", 0.75))))
     try:
         youtube_url = state.get("youtube_url", "").strip()
@@ -414,12 +412,11 @@ def render_tiktok_video(job_id: str) -> None:
         write_tiktok_state(job_id, {"progress": 40, "message": "Накладываю анимированный логотип l2watcher"})
         filter_complex = (
             f"[1:v]scale=100:-1,format=rgba,colorchannelmixer=aa={logo_opacity:.2f},"
-            f"loop=-1:1:0,fps=25,"
-            f"rotate={angle}:ow=1.5*iw:oh=1.5*ih:c=black@0[logo];"
+            f"loop=-1:1:0[logo];"
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             f"crop=1080:1920,eq=contrast=1.07:saturation=1.08:brightness=-0.018,"
             f"unsharp=5:5:0.55:3:3:0.25[bg];"
-            f"[bg][logo]overlay=(W-w)/2:H-h-30:shortest=1"
+            f"[bg][logo]overlay=W-w-30:(H-h)/2+8*sin(2*PI*t/3):eval=frame:shortest=1"
         )
         run_cmd(job_id, [
             FFMPEG, "-y",
