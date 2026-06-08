@@ -447,10 +447,12 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
     clean_url = url.split("?")[0] if "?" in url else url
 
-    def build_cmd(fmt: str | None, use_cookies: bool = True) -> list[str]:
+    def build_cmd(fmt: str | None, extractor_args: str | None = "youtube:player_client=web,android", use_cookies: bool = True) -> list[str]:
         c = [YT_DLP_BIN, "-o", str(output_path), "--no-playlist", "--no-warnings"]
         if fmt is not None:
             c.extend(["-f", fmt])
+        if extractor_args is not None:
+            c.extend(["--extractor-args", extractor_args])
         if use_cookies and cookies_arg:
             c.extend(["--cookies", cookies_arg])
         c.append(clean_url)
@@ -471,19 +473,26 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
         except Exception as exc:
             log(job_id, f"Failed to decode YT_DLP_COOKIES_BASE64: {exc}")
     else:
-        log(job_id, f"No cookies found: YT_COOKIES_FILE={repr(YT_COOKIES_FILE)}, YT_DLP_COOKIES_BASE64={'set' if os.getenv('YT_DLP_COOKIES_BASE64') else 'NOT SET'}")
+        log(job_id, f"No cookies found")
 
-    formats_to_try = ["b", "w", None]
-    for fmt in formats_to_try:
-        log(job_id, f"Trying format: {fmt if fmt else 'default'} with cookies={bool(cookies_arg)}")
-        result = subprocess.run(build_cmd(fmt, bool(cookies_arg)), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
-        log(job_id, result.stdout[-3000:])
+    formats_to_try: list[tuple[str | None, str | None, bool]] = [
+        ("bv*+ba/b", "youtube:player_client=web,android", True),
+        ("best", "youtube:player_client=web,android", True),
+        ("worst", "youtube:player_client=web,android", True),
+        ("bv*+ba/b", None, False),
+    ]
+    for fmt, ext_args, use_cookies in formats_to_try:
+        label = f"f={fmt or 'default'}, client={ext_args or 'default'}, cookies={use_cookies}"
+        log(job_id, f"Trying: {label}")
+        result = subprocess.run(build_cmd(fmt, ext_args, use_cookies), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+        log(job_id, result.stdout[-2000:])
         if result.returncode == 0 and output_path.exists():
+            log(job_id, f"Success with: {label}")
             return output_path
     msg = result.stdout[-1000:]
     if "Sign in" in msg or "bot" in msg:
-        raise RuntimeError(f"YouTube блокирует скачивание без Cookie. Проверь логи выше — видно, нашлись ли куки.")
-    raise RuntimeError(f"yt-dlp failed after 3 format attempts: {msg}")
+        raise RuntimeError(f"YouTube блокирует скачивание. Попробуй загрузить видео файлом вместо URL.")
+    raise RuntimeError(f"yt-dlp: видео недоступно для скачивания. Попробуй другой URL или загрузи файл.")
     if not output_path.exists():
         raise RuntimeError(f"yt-dlp не создал файл: {output_path}")
     return output_path
