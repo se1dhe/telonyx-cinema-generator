@@ -412,10 +412,10 @@ except Exception as _e:
     print(f"[startup] yt-dlp version check failed: {_e}")
 
 
-def _run_meta_cmd(job_id: str, cmd: list[str]) -> dict:
-    log(job_id, f"meta: {' '.join(cmd)}")
+def _run_meta_cmd(job_id: str, cmd: list[str], timeout: int = 30) -> dict:
+    log(job_id, f"meta: timeout={timeout}s {' '.join(cmd)}")
     try:
-        r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         if r.returncode != 0:
             log(job_id, f"meta fail (exit={r.returncode}): {r.stderr[-400:]}")
             return {}
@@ -428,6 +428,9 @@ def _run_meta_cmd(job_id: str, cmd: list[str]) -> dict:
         }
         log(job_id, f"meta OK: title=[{meta['title'][:80]}] tags={len(meta['tags'])}")
         return meta
+    except subprocess.TimeoutExpired:
+        log(job_id, f"meta timeout ({timeout}s)")
+        return {}
     except Exception as exc:
         log(job_id, f"meta exception: {exc}")
         return {}
@@ -435,44 +438,38 @@ def _run_meta_cmd(job_id: str, cmd: list[str]) -> dict:
 def extract_youtube_metadata(job_id: str, url: str) -> dict:
     clean = url.split("?")[0] if "?" in url else url
 
-    def base_cmd() -> list[str]:
-        return [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "30"]
+    cookies_arg: str | None = None
+    if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
+        cookies_arg = YT_COOKIES_FILE
+        log(job_id, f"meta: +cookies file {YT_COOKIES_FILE}")
+    elif YT_COOKIES_BASE64:
+        cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
+        try:
+            raw = base64.b64decode(YT_COOKIES_BASE64)
+            cp.write_text(raw.decode("utf-8"), encoding="utf-8")
+            cookies_arg = str(cp)
+            log(job_id, f"meta: +decoded cookies ({len(raw)} bytes)")
+        except Exception as exc:
+            log(job_id, f"meta: cookies decode err: {exc}")
 
-    def add_cookies(cmd: list[str]) -> None:
-        if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
-            cmd.extend(["--cookies", YT_COOKIES_FILE])
-            log(job_id, f"meta: +cookies file {YT_COOKIES_FILE}")
-        elif YT_COOKIES_BASE64:
-            cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
-            try:
-                raw = base64.b64decode(YT_COOKIES_BASE64)
-                cp.write_text(raw.decode("utf-8"), encoding="utf-8")
-                cmd.extend(["--cookies", str(cp)])
-                log(job_id, f"meta: +decoded cookies ({len(raw)} bytes)")
-            except Exception as exc:
-                log(job_id, f"meta: cookies decode err: {exc}")
-
-    # Попытка 1: быстро, без remote-components
-    c1 = base_cmd()
-    c1.append(clean)
-    meta = _run_meta_cmd(job_id, c1)
+    # Попытка 1: cookies + короткий таймаут, без remote-components
+    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "15"]
+    if cookies_arg:
+        cmd += ["--cookies", cookies_arg]
+    cmd.append(clean)
+    meta = _run_meta_cmd(job_id, cmd, timeout=15)
     if meta:
         return meta
 
-    # Попытка 2: с remote-components (нужно для нестандартных Shorts)
-    c2 = base_cmd()
-    c2 += ["--remote-components", "ejs:github", "--js-runtimes", "node"]
-    c2.append(clean)
-    meta = _run_meta_cmd(job_id, c2)
-    if meta:
-        return meta
-
-    # Попытка 3: с cookies (некоторые видео требуют авторизации)
-    c3 = base_cmd()
-    c3 += ["--remote-components", "ejs:github", "--js-runtimes", "node"]
-    add_cookies(c3)
-    c3.append(clean)
-    return _run_meta_cmd(job_id, c3)
+    # Попытка 2: с remote-components, дольше (но не бесконечно)
+    log(job_id, "meta: повтор с remote-components (30s timeout)...")
+    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "15",
+           "--remote-components", "ejs:github", "--js-runtimes", "node"]
+    if cookies_arg:
+        cmd += ["--cookies", cookies_arg]
+    cmd.append(clean)
+    meta = _run_meta_cmd(job_id, cmd, timeout=30)
+    return meta
 
 
 def suggest_l2_tags(job_id: str, youtube_meta: dict, platform: str = "tiktok") -> tuple[list[str], str, str]:
