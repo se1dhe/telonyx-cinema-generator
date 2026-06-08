@@ -411,7 +411,7 @@ def render_tiktok_video(job_id: str) -> None:
         duration = probe_duration(job_id, input_path)
         write_tiktok_state(job_id, {"progress": 40, "message": "Накладываю анимированный логотип l2watcher"})
         filter_complex = (
-            f"[1:v]scale=100:-1,hqdn3d=3:2:0:0,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(pow(X-W/2,2)+pow(Y-H/2,2),pow(W/2,2)),255,0)',colorchannelmixer=aa={logo_opacity:.2f}[logo];"
+            f"[1:v]scale=100:-1,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(pow(X-W/2,2)+pow(Y-H/2,2),pow(W/2,2)),255,0)',colorchannelmixer=aa={logo_opacity:.2f}[logo];"
             f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
             f"crop=1080:1920,eq=contrast=1.07:saturation=1.08:brightness=-0.018,"
             f"unsharp=5:5:0.55:3:3:0.25[bg];"
