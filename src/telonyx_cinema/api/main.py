@@ -401,10 +401,23 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0
 
 def extract_youtube_metadata(job_id: str, url: str) -> dict:
     clean = url.split("?")[0] if "?" in url else url
+    cmd = [YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", "--socket-timeout", "15", "--remote-components", "ejs:github", "--js-runtimes", "node"]
+    cookies_arg: str | None = None
+    if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
+        cookies_arg = YT_COOKIES_FILE
+    elif YT_COOKIES_BASE64:
+        cp = Path(tempfile.mkdtemp()) / "meta_cookies.txt"
+        try:
+            raw = base64.b64decode(YT_COOKIES_BASE64)
+            cp.write_text(raw.decode("utf-8"), encoding="utf-8")
+            cookies_arg = str(cp)
+        except Exception:
+            pass
+    if cookies_arg:
+        cmd.extend(["--cookies", cookies_arg])
+    cmd.append(clean)
     try:
-        r = subprocess.run([
-            YT_DLP_BIN, "--dump-json", "--no-playlist", "--no-warnings", clean
-        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        r = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         if r.returncode != 0:
             log(job_id, f"metadata extract failed: {r.stderr[-300:]}")
             return {}
