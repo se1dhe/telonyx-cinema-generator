@@ -446,13 +446,16 @@ def render_tiktok_video(job_id: str) -> None:
 def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
     clean_url = url.split("?")[0] if "?" in url else url
-    cmd = [
-        YT_DLP_BIN,
-        "-f", "b",
-        "-o", str(output_path),
-        "--no-playlist",
-        "--no-warnings",
-    ]
+
+    def build_cmd(fmt: str | None, use_cookies: bool = True) -> list[str]:
+        c = [YT_DLP_BIN, "-o", str(output_path), "--no-playlist", "--no-warnings"]
+        if fmt is not None:
+            c.extend(["-f", fmt])
+        if use_cookies and cookies_arg:
+            c.extend(["--cookies", cookies_arg])
+        c.append(clean_url)
+        return c
+
     cookies_arg = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
         cookies_arg = YT_COOKIES_FILE
@@ -469,17 +472,18 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
             log(job_id, f"Failed to decode YT_DLP_COOKIES_BASE64: {exc}")
     else:
         log(job_id, f"No cookies found: YT_COOKIES_FILE={repr(YT_COOKIES_FILE)}, YT_DLP_COOKIES_BASE64={'set' if os.getenv('YT_DLP_COOKIES_BASE64') else 'NOT SET'}")
-    if cookies_arg:
-        cmd.extend(["--cookies", cookies_arg])
-    cmd.append(clean_url)
-    log(job_id, f"Downloading YouTube video: {clean_url}")
-    result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
-    log(job_id, result.stdout[-3000:])
-    if result.returncode != 0:
-        msg = result.stdout[-1000:]
-        if "Sign in" in msg or "bot" in msg:
-            raise RuntimeError(f"YouTube блокирует скачивание без Cookie. Проверь логи выше — видно, нашлись ли куки.")
-        raise RuntimeError(f"yt-dlp failed: {msg}")
+
+    formats_to_try = ["b", "w", None]
+    for fmt in formats_to_try:
+        log(job_id, f"Trying format: {fmt if fmt else 'default'} with cookies={bool(cookies_arg)}")
+        result = subprocess.run(build_cmd(fmt, bool(cookies_arg)), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+        log(job_id, result.stdout[-3000:])
+        if result.returncode == 0 and output_path.exists():
+            return output_path
+    msg = result.stdout[-1000:]
+    if "Sign in" in msg or "bot" in msg:
+        raise RuntimeError(f"YouTube блокирует скачивание без Cookie. Проверь логи выше — видно, нашлись ли куки.")
+    raise RuntimeError(f"yt-dlp failed after 3 format attempts: {msg}")
     if not output_path.exists():
         raise RuntimeError(f"yt-dlp не создал файл: {output_path}")
     return output_path
