@@ -1,7 +1,9 @@
+import base64
 import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import uuid
 from datetime import datetime
@@ -24,7 +26,9 @@ MODEL_DEVICE = os.getenv("MODEL_DEVICE", "cpu")
 FFMPEG = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE = os.getenv("FFPROBE_BIN", "ffprobe")
 LOGO_PATH = os.getenv("LOGO_PATH", str(Path(__file__).parent / "static" / "logo.png"))
-YT_COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "")
+YT_DLP_BIN = os.getenv("YT_DLP_BIN", "yt-dlp")
+YT_COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "") or os.getenv("YT_DLP_COOKIES_FILE", "")
+YT_COOKIES_BASE64 = os.getenv("YT_DLP_COOKIES_BASE64", "")
 
 LANGUAGE_LABELS = {"auto": "Auto", "ru": "Русский", "en": "English", "uk": "Українська"}
 LANGUAGE_PROMPTS = {
@@ -440,7 +444,7 @@ def render_tiktok_video(job_id: str) -> None:
 def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
     cmd = [
-        "yt-dlp",
+        YT_DLP_BIN,
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", str(output_path),
@@ -448,8 +452,21 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
         "--no-warnings",
         "--extractor-args", "youtube:player_client=android",
     ]
+    cookies_arg = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
-        cmd.extend(["--cookies", YT_COOKIES_FILE])
+        cookies_arg = YT_COOKIES_FILE
+        log(job_id, f"Using cookies file: {YT_COOKIES_FILE}")
+    elif YT_COOKIES_BASE64:
+        cookies_path = output_dir / "cookies.txt"
+        try:
+            decoded = base64.b64decode(YT_COOKIES_BASE64).decode("utf-8")
+            cookies_path.write_text(decoded, encoding="utf-8")
+            cookies_arg = str(cookies_path)
+            log(job_id, "Using base64 cookies (decoded)")
+        except Exception as exc:
+            log(job_id, f"Failed to decode YT_DLP_COOKIES_BASE64: {exc}")
+    if cookies_arg:
+        cmd.extend(["--cookies", cookies_arg])
     cmd.append(url)
     log(job_id, f"Downloading YouTube video: {url}")
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
