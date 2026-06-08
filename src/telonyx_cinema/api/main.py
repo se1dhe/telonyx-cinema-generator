@@ -77,6 +77,8 @@ def write_state(job_id: str, patch: dict[str, Any]) -> None:
 
 
 def log(job_id: str, message: str) -> None:
+    line = f"[{job_id}] {message}"
+    print(line, flush=True)
     d = job_dir(job_id)
     d.mkdir(parents=True, exist_ok=True)
     with (d / "render.log").open("a", encoding="utf-8") as file:
