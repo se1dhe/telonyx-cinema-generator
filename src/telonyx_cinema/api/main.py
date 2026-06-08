@@ -461,12 +461,15 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     elif YT_COOKIES_BASE64:
         cookies_path = output_dir / "cookies.txt"
         try:
-            decoded = base64.b64decode(YT_COOKIES_BASE64).decode("utf-8")
+            raw = base64.b64decode(YT_COOKIES_BASE64)
+            decoded = raw.decode("utf-8")
             cookies_path.write_text(decoded, encoding="utf-8")
             cookies_arg = str(cookies_path)
-            log(job_id, "Using base64 cookies (decoded)")
+            log(job_id, f"Decoded YT_DLP_COOKIES_BASE64: {len(raw)} bytes -> {cookies_path}")
         except Exception as exc:
             log(job_id, f"Failed to decode YT_DLP_COOKIES_BASE64: {exc}")
+    else:
+        log(job_id, f"No cookies found: YT_COOKIES_FILE={repr(YT_COOKIES_FILE)}, YT_DLP_COOKIES_BASE64={'set' if os.getenv('YT_DLP_COOKIES_BASE64') else 'NOT SET'}")
     if cookies_arg:
         cmd.extend(["--cookies", cookies_arg])
     cmd.append(url)
@@ -476,7 +479,7 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     if result.returncode != 0:
         msg = result.stdout[-1000:]
         if "Sign in" in msg or "bot" in msg:
-            raise RuntimeError(f"YouTube блокирует скачивание без Cookie. \n1. Экспортируй куки из браузера в txt-файл (Netscape формат)\n2. Укажи путь: YT_COOKIES_FILE=/path/to/cookies.txt\nИли используй загрузку файла вместо URL.")
+            raise RuntimeError(f"YouTube блокирует скачивание без Cookie. Проверь логи выше — видно, нашлись ли куки.")
         raise RuntimeError(f"yt-dlp failed: {msg}")
     if not output_path.exists():
         raise RuntimeError(f"yt-dlp не создал файл: {output_path}")
