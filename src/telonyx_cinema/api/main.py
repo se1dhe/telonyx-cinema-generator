@@ -447,18 +447,7 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     output_path = output_dir / "youtube_input.mp4"
     clean_url = url.split("?")[0] if "?" in url else url
 
-    def build_cmd(fmt: str | None, extractor_args: str | None = "youtube:player_client=web,android", use_cookies: bool = True) -> list[str]:
-        c = [YT_DLP_BIN, "-o", str(output_path), "--no-playlist", "--no-warnings"]
-        if fmt is not None:
-            c.extend(["-f", fmt])
-        if extractor_args is not None:
-            c.extend(["--extractor-args", extractor_args])
-        if use_cookies and cookies_arg:
-            c.extend(["--cookies", cookies_arg])
-        c.append(clean_url)
-        return c
-
-    cookies_arg = None
+    cookies_arg: str | None = None
     if YT_COOKIES_FILE and Path(YT_COOKIES_FILE).exists():
         cookies_arg = YT_COOKIES_FILE
         log(job_id, f"Using cookies file: {YT_COOKIES_FILE}")
@@ -469,33 +458,39 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
             decoded = raw.decode("utf-8")
             cookies_path.write_text(decoded, encoding="utf-8")
             cookies_arg = str(cookies_path)
-            log(job_id, f"Decoded YT_DLP_COOKIES_BASE64: {len(raw)} bytes -> {cookies_path}")
+            log(job_id, f"Decoded YT_DLP_COOKIES_BASE64: {len(raw)} bytes")
         except Exception as exc:
             log(job_id, f"Failed to decode YT_DLP_COOKIES_BASE64: {exc}")
-    else:
-        log(job_id, f"No cookies found")
 
-    formats_to_try: list[tuple[str | None, str | None, bool]] = [
-        ("bv*+ba/b", "youtube:player_client=web,android", True),
-        ("best", "youtube:player_client=web,android", True),
-        ("worst", "youtube:player_client=web,android", True),
-        ("bv*+ba/b", None, False),
+    def build_cmd(fmt: str) -> list[str]:
+        c = [
+            YT_DLP_BIN, "--no-playlist", "--newline",
+            "--concurrent-fragments", "4",
+            "--js-runtimes", "node",
+            "--remote-components", "ejs:github",
+            "--merge-output-format", "mp4",
+            "--remux-video", "mp4",
+            "--format-sort", "res",
+            "--format", fmt,
+            "--output", str(output_path),
+        ]
+        if cookies_arg:
+            c.extend(["--cookies", cookies_arg])
+        c.append(clean_url)
+        return c
+
+    formats_to_try = [
+        "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/best[height<=1080][vcodec!=none][acodec!=none]/bestvideo+bestaudio/best[vcodec!=none][acodec!=none]",
+        "bestvideo+bestaudio/best",
+        "best",
     ]
-    for fmt, ext_args, use_cookies in formats_to_try:
-        label = f"f={fmt or 'default'}, client={ext_args or 'default'}, cookies={use_cookies}"
-        log(job_id, f"Trying: {label}")
-        result = subprocess.run(build_cmd(fmt, ext_args, use_cookies), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+    for fmt in formats_to_try:
+        log(job_id, f"Trying format: {fmt[:60]}...")
+        result = subprocess.run(build_cmd(fmt), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
         log(job_id, result.stdout[-2000:])
         if result.returncode == 0 and output_path.exists():
-            log(job_id, f"Success with: {label}")
             return output_path
-    msg = result.stdout[-1000:]
-    if "Sign in" in msg or "bot" in msg:
-        raise RuntimeError(f"YouTube блокирует скачивание. Попробуй загрузить видео файлом вместо URL.")
-    raise RuntimeError(f"yt-dlp: видео недоступно для скачивания. Попробуй другой URL или загрузи файл.")
-    if not output_path.exists():
-        raise RuntimeError(f"yt-dlp не создал файл: {output_path}")
-    return output_path
+    raise RuntimeError(f"Не удалось скачать видео. Попробуй другой URL или загрузи файл.")
 
 
 def cleanup_job(job_id: str) -> None:
