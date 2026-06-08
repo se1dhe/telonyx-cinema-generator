@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -13,6 +14,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from telonyx_cinema.api.publishing import router as publishing_router
 
@@ -481,6 +483,14 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     return output_path
 
 
+def cleanup_job(job_id: str) -> None:
+    d = job_dir(job_id)
+    if d.exists():
+        shutil.rmtree(d)
+    JOBS.pop(job_id, None)
+    TIKTOK_JOBS.pop(job_id, None)
+
+
 def write_tiktok_state(job_id: str, patch: dict) -> None:
     with LOCK:
         current = TIKTOK_JOBS.setdefault(job_id, {})
@@ -554,7 +564,7 @@ def download(job_id: str) -> FileResponse:
     output = job_dir(job_id) / "final_vertical.mp4"
     if not output.exists():
         raise HTTPException(status_code=404, detail="Файл ещё не готов")
-    return FileResponse(output, media_type="video/mp4", filename=f"txc_{job_id}_vertical.mp4")
+    return FileResponse(output, media_type="video/mp4", filename=f"txc_{job_id}_vertical.mp4", background=BackgroundTask(cleanup_job, job_id))
 
 
 @app.post("/api/tiktok-jobs")
@@ -607,4 +617,4 @@ def download_tiktok(job_id: str) -> FileResponse:
     output = job_dir(job_id) / "final_tiktok.mp4"
     if not output.exists():
         raise HTTPException(status_code=404, detail="Файл ещё не готов")
-    return FileResponse(output, media_type="video/mp4", filename=f"tiktok_{job_id}.mp4")
+    return FileResponse(output, media_type="video/mp4", filename=f"tiktok_{job_id}.mp4", background=BackgroundTask(cleanup_job, job_id))
