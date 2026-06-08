@@ -639,8 +639,11 @@ def download_youtube_video(job_id: str, url: str, output_dir: Path) -> Path:
     ]
     for fmt in formats_to_try:
         log(job_id, f"Trying format: {fmt[:60]}...")
-        result = subprocess.run(build_cmd(fmt), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
-        log(job_id, result.stdout[-2000:])
+        dl_log = output_dir / f"ytdlp_{fmt[:20].replace('[','').replace(']','')}.log"
+        with open(dl_log, "w", encoding="utf-8") as logf:
+            result = subprocess.run(build_cmd(fmt), text=True, stdout=logf, stderr=subprocess.STDOUT, timeout=600)
+        tail = dl_log.read_text(encoding="utf-8")[-2000:]
+        log(job_id, tail.strip() or f"exit={result.returncode}")
         if result.returncode == 0 and output_path.exists():
             return output_path
     raise RuntimeError(f"Не удалось скачать видео. Попробуй другой URL или загрузи файл.")
